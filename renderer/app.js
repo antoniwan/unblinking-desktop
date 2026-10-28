@@ -18,6 +18,7 @@ const voice = createVoice();
 // prefs main.js sends; these defaults hold until the first message arrives.
 let world = null;
 let prefs = { whispers: true, blind: false, voice: false };
+let trustedLevel = 0;
 let whisperTimer = null;
 
 // Every whisper passes through here: kind is the LINES key in mind.js.
@@ -86,9 +87,12 @@ function frame(now) {
       lookFailed = true;
     }
   }
-  // The mic hears the speakers, so it goes deaf while the eye speaks.
+  // The mic hears the speakers, so while the eye's own sound may reach it
+  // (speaking, or the drone loud or swelling) the mind keeps the last level it trusted.
+  // Holding rather than zeroing keeps the bang detector's baseline steady.
   const heard = senses.listen();
-  const level = voice.speaking ? 0 : heard;
+  if (!voice.masking) trustedLevel = heard;
+  const level = trustedLevel;
 
   // s: the mind's state this frame (gaze, pupil, heat, flare, wide, dim, shake, mode).
   const s = mind.update(dt, {
