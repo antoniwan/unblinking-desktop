@@ -726,6 +726,14 @@ impl App {
             swirl: look.swirl,
             glow: look.glow,
             embers: look.embers,
+            time: (self.started.elapsed().as_secs_f32()) % 3600.0,
+            breath: 0.0,
+            morph: 0.0,
+            gaze_vel: [0.0, 0.0],
+            pupil_vel: 0.0,
+            quality: 1.0,
+            wince: 0.0,
+            roll: 0.0,
         };
         if self.panel.is_some() {
             self.observe(&s, &state, reason, level, window);
