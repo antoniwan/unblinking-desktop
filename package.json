@@ -1,0 +1,18 @@
+{
+  "name": "unblinking",
+  "productName": "Unblinking",
+  "version": "0.1.0",
+  "description": "A burning eye that lives on your desktop and watches you through your camera and microphone.",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "setup": "node scripts/fetch-model.mjs && node scripts/make-icons.mjs"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.2.0"
+  },
+  "devDependencies": {
+    "electron": "^45.1.0"
+  }
+}
