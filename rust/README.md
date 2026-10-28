@@ -106,6 +106,23 @@ looks at a 1280x720 frame in 23.6 ms (`--bench-face`). Asking wgpu for small
 GPU memory blocks (`MemoryHints::MemoryUsage`) saved about 180 MB of
 private memory.
 
+## Frame rate and idle cost
+
+The eye doesn't draw as fast as the monitor allows. `src/pacing.rs` picks a
+frame interval and the loop sleeps until then (`ControlFlow::WaitUntil`):
+
+| State | Eye frames | Face model |
+| --- | --- | --- |
+| Shown, opening or closing, or a Senses/camera window open | 60 a second | 15 a second |
+| Shown but blinded, or calm (only looking around, no face and no noise for a minute) | 30 a second | off when blinded, else 15 |
+| Hidden | none; wakes 4 times a second to poll the tray, Ctrl+Alt+B and relaunches | about 3 a second, camera kept open |
+
+All motion is timed by the clock, so fewer frames never slow it down. The
+terminal heartbeat line ends in `fps=` to check the rate. To measure on
+Windows, watch the CPU and GPU columns in Task Manager (Details tab, with
+the GPU column added) for a minute each while shown with a face in view,
+shown and calm, blinded, and hidden.
+
 ## How the window is transparent
 
 wgpu's DX12 backend is set to `Dx12SwapchainKind::DxgiFromVisual`, which is a
@@ -119,6 +136,7 @@ as a fallback.
 | File | What it holds |
 | --- | --- |
 | `src/main.rs` | The window, the frame loop, the flags, and the snapshot |
+| `src/pacing.rs` | How often to draw (60, 30, or not at all), plus its tests |
 | `src/eye.rs` | The wgpu pipeline and the frame readback |
 | `src/shaders/eye.frag` | The eye shader, carried over from `eye.js` |
 | `src/mind.rs` | The mind's modes, moods and whispers, plus their tests |

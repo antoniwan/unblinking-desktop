@@ -1,6 +1,6 @@
 //! The camera runs on its own thread, so a slow frame never stalls the eye.
-//! It looks for faces at most 15 times a second and sends what it saw to the
-//! main loop over a channel.
+//! It looks for faces at most 15 times a second (about 3 while the eye is
+//! hidden) and sends what it saw to the main loop over a channel.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,11 @@ use super::{Detection, Detector};
 
 /// Face detection is the costly part; 15 times a second is plenty.
 const LOOK_EVERY: Duration = Duration::from_millis(66);
+/// While the eye is hidden nobody sees it react, so look about 3 times a
+/// second: a fifth of the work. The camera stays open (reopening one takes a
+/// second or more, and its light would blink), and a fresh sight is ready the
+/// moment the eye comes back.
+const LOOK_EVERY_RESTING: Duration = Duration::from_millis(333);
 
 /// How wide the live picture for Blinki's Senses is.
 const PREVIEW_WIDTH: u32 = 480;
@@ -45,6 +50,8 @@ pub struct Eyes {
     stop: Arc<AtomicBool>,
     /// Set while Blinki's Senses is open and wants the picture.
     preview: Arc<AtomicBool>,
+    /// Set while the eye is hidden: look at faces less often.
+    resting: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     reports: Receiver<Sight>,
     latest: Sight,
@@ -69,16 +76,22 @@ impl Eyes {
         // keeps the Sender, we keep the Receiver.
         let (tx, reports) = mpsc::channel();
         let preview = Arc::new(AtomicBool::new(false));
-        let (flag, want) = (Arc::clone(&stop), Arc::clone(&preview));
+        let resting = Arc::new(AtomicBool::new(false));
+        let (flag, want, rest) = (
+            Arc::clone(&stop),
+            Arc::clone(&preview),
+            Arc::clone(&resting),
+        );
         // `move` hands the closure ownership of what it uses (the detector,
         // the flags, the sender), so they travel to the new thread with it.
         let thread = thread::Builder::new()
             .name("camera".into())
-            .spawn(move || watch(make, flag, want, tx))
+            .spawn(move || watch(make, flag, want, rest, tx))
             .expect("spawn camera thread");
         Eyes {
             stop,
             preview,
+            resting,
             thread: Some(thread),
             reports,
             latest: Sight::default(),
@@ -100,6 +113,12 @@ impl Eyes {
         if !on {
             self.latest.preview = None;
         }
+    }
+
+    /// Asks the camera thread to look less often (while the eye is hidden),
+    /// or at the full rate again. Cheap enough to call every loop.
+    pub fn set_resting(&self, on: bool) {
+        self.resting.store(on, Ordering::Relaxed);
     }
 }
 
@@ -128,8 +147,13 @@ pub(super) fn open_camera() -> Result<Camera, nokhwa::NokhwaError> {
 }
 
 /// The camera thread's whole life.
-fn watch<F>(make: F, stop: Arc<AtomicBool>, preview: Arc<AtomicBool>, tx: Sender<Sight>)
-where
+fn watch<F>(
+    make: F,
+    stop: Arc<AtomicBool>,
+    preview: Arc<AtomicBool>,
+    resting: Arc<AtomicBool>,
+    tx: Sender<Sight>,
+) where
     F: FnOnce() -> Result<Box<dyn Detector>, String>,
 {
     // A camera without a detector sees nothing, so don't turn its light on.
@@ -173,7 +197,13 @@ where
                 break;
             }
         };
-        if last_look.is_some_and(|t| t.elapsed() < LOOK_EVERY) {
+        // Skipped frames are never decoded, so they cost almost nothing.
+        let every = if resting.load(Ordering::Relaxed) {
+            LOOK_EVERY_RESTING
+        } else {
+            LOOK_EVERY
+        };
+        if last_look.is_some_and(|t| t.elapsed() < every) {
             continue;
         }
         last_look = Some(Instant::now());

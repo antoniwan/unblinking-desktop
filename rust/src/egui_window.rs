@@ -44,8 +44,8 @@ impl EguiWindow {
             format,
             width: inner.width.max(1),
             height: inner.height.max(1),
-            // No vsync wait here: the eye's own present already paces the
-            // loop, and waiting twice per frame would halve its frame rate.
+            // No vsync wait here: the main loop paces frames (pacing.rs),
+            // and waiting on vsync twice per frame would halve the rate.
             present_mode: wgpu::PresentMode::AutoNoVsync,
             desired_maximum_frame_latency: 2,
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
