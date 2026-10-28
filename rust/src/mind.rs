@@ -375,10 +375,11 @@ impl Mind {
         // Cursor motion, for when there is no face to watch.
         if let Some(w) = world {
             let c = w.cursor;
-            if let Some(last) = self.last_cursor {
-                if (c.x - last.x).hypot(c.y - last.y) > 3.0 * w.scale {
-                    self.cursor_moved_at = t;
-                }
+            // A *let chain*: `if let ... && condition` (Rust 2024) checks both at once.
+            if let Some(last) = self.last_cursor
+                && (c.x - last.x).hypot(c.y - last.y) > 3.0 * w.scale
+            {
+                self.cursor_moved_at = t;
             }
             self.last_cursor = Some(c);
         }
@@ -624,7 +625,11 @@ mod tests {
     /// A mind whose whispers land in a shared list we can inspect.
     /// `Rc<RefCell<..>>` is shared ownership (Rc) of a value we can still
     /// mutate (RefCell): the closure holds one handle, the test the other.
-    fn mind() -> (Mind, Rc<RefCell<Vec<(&'static str, Line)>>>) {
+    /// Every whisper so far, shared with the test. A `type` alias names a
+    /// long type once so the signatures below stay readable.
+    type Said = Rc<RefCell<Vec<(&'static str, Line)>>>;
+
+    fn mind() -> (Mind, Said) {
         let said = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&said);
         // `move` makes the closure take ownership of `sink`.
@@ -662,7 +667,7 @@ mod tests {
         last
     }
 
-    fn kinds(said: &Rc<RefCell<Vec<(&'static str, Line)>>>) -> Vec<Line> {
+    fn kinds(said: &Said) -> Vec<Line> {
         said.borrow().iter().map(|&(_, k)| k).collect()
     }
 
@@ -1001,5 +1006,103 @@ mod tests {
         assert_eq!(g, Vec2::new(1.0, 1.0));
         let g = Mind::gaze_at_point(0.0, 0.0, eye, 100.0, 1.0);
         assert_eq!(g, Vec2::new(0.0, 0.0));
+    }
+
+    fn count(said: &Said, kind: Line) -> usize {
+        kinds(said).iter().filter(|&&k| k == kind).count()
+    }
+
+    #[test]
+    fn a_line_waits_out_its_own_cooldown() {
+        // Loud has a 15 s cooldown, longer than the 6 s hush between any two
+        // whispers. A second bang at 10 s still flinches but stays silent;
+        // a third, after the cooldown, speaks again.
+        let (mut m, said) = mind();
+        let quiet = senses(&[]);
+        let bang = Senses {
+            level: 0.9,
+            ..senses(&[])
+        };
+        run(&mut m, 3.0, &quiet);
+        m.update(DT, &bang);
+        run(&mut m, 7.0, &quiet);
+        let f = m.update(DT, &bang);
+        assert!(f.flare > 0.95, "it still flinches, flare {}", f.flare);
+        assert_eq!(count(&said, Line::Loud), 1, "but says nothing yet");
+        run(&mut m, 10.0, &quiet);
+        m.update(DT, &bang);
+        assert_eq!(count(&said, Line::Loud), 2);
+    }
+
+    #[test]
+    fn steady_talk_is_heard_but_is_not_a_bang() {
+        let (mut m, said) = mind();
+        run(&mut m, 3.0, &senses(&[]));
+        let talk = Senses {
+            level: 0.5,
+            ..senses(&[])
+        };
+        let f = run(&mut m, 4.0, &talk);
+        assert!(f.flare < 0.05, "no flinch, flare {}", f.flare);
+        assert_eq!(kinds(&said), [Line::Talking]);
+    }
+
+    #[test]
+    fn a_short_absence_is_not_a_return() {
+        // Gone for 5 s (past the flicker hold, under the 12 s "returned"
+        // threshold): it hunts, then locks again without a welcome.
+        let (mut m, said) = mind();
+        let you = [face(0.5, 0.5)];
+        run(&mut m, 1.0, &senses(&you));
+        assert_eq!(run(&mut m, 5.0, &senses(&[])).mode, Mode::Hunting);
+        assert_eq!(run(&mut m, 0.5, &senses(&you)).mode, Mode::Locked);
+        assert_eq!(kinds(&said), [Line::First]);
+    }
+
+    #[test]
+    fn blind_wins_over_a_face_in_view() {
+        let (mut m, said) = mind();
+        let faces = [face(0.5, 0.5)];
+        let blind = Senses {
+            blind: true,
+            ..senses(&faces)
+        };
+        assert_eq!(run(&mut m, 2.0, &blind).mode, Mode::Blind);
+        assert!(said.borrow().is_empty(), "it saw no one");
+    }
+
+    #[test]
+    fn says_still_watching_after_fifteen_minutes() {
+        let (mut m, said) = mind();
+        let you = [face(0.5, 0.5)];
+        run(&mut m, 14.0 * 60.0, &senses(&you));
+        assert_eq!(count(&said, Line::Long), 0);
+        run(&mut m, 2.0 * 60.0, &senses(&you));
+        assert_eq!(count(&said, Line::Long), 1);
+    }
+
+    #[test]
+    fn the_same_seed_makes_the_same_eye() {
+        // Hunting darts are random; with a seeded Rng two minds agree exactly.
+        let (mut a, _) = mind();
+        let (mut b, _) = mind();
+        let fa = run(&mut a, 10.0, &senses(&[]));
+        let fb = run(&mut b, 10.0, &senses(&[]));
+        assert_eq!((fa.gaze, fa.pupil, fa.shake), (fb.gaze, fb.pupil, fb.shake));
+    }
+
+    #[test]
+    fn crowd_size_counts_confident_faces_of_a_similar_size() {
+        let f = |size, score| Face {
+            size,
+            score,
+            ..face(0.5, 0.5)
+        };
+        assert_eq!(crowd_size(&[]), 0);
+        assert_eq!(crowd_size(&[f(0.2, 0.9)]), 1);
+        assert_eq!(crowd_size(&[f(0.2, 0.9), f(0.17, 0.8)]), 2);
+        // Too small next to the biggest (a photo on the wall), or unsure.
+        assert_eq!(crowd_size(&[f(0.2, 0.9), f(0.1, 0.9)]), 1);
+        assert_eq!(crowd_size(&[f(0.2, 0.9), f(0.2, 0.4)]), 1);
     }
 }

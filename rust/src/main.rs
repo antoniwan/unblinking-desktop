@@ -534,6 +534,7 @@ struct App {
     flinch_marks: VecDeque<bool>,
     last_startle: f64,
     /// Every whisper so far, for the Mind lens.
+    #[allow(clippy::type_complexity)]
     whisper_log: Rc<RefCell<Vec<(Instant, Line, &'static str)>>>,
     /// The drone and spoken whispers, and how many logged whispers it has seen.
     voice: Voice,
