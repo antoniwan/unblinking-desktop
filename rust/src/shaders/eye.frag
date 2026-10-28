@@ -1,10 +1,11 @@
 #version 450
 // The eye's fragment shader, carried over from renderer/eye.js.
-// The body below main() is the WebGL shader unchanged except for three spots:
+// The body below main() is the WebGL shader unchanged except for these spots:
 //   - uniforms live in one uniform block (wgpu has no loose uniforms),
 //   - wgpu's gl_FragCoord starts at the top left, WebGL's at the bottom left,
 //     so `fragXY` flips y back,
-//   - the result goes to `outColor` instead of gl_FragColor.
+//   - the result goes to `outColor` instead of gl_FragColor,
+//   - uFade and uSize let the app ease the whole eye in and out.
 // naga (wgpu's shader translator) compiles this GLSL for DX12 or Vulkan.
 
 // Three vec4s keep the std140 layout simple; must match `Uniforms` in eye.rs.
@@ -12,6 +13,7 @@ layout(set = 0, binding = 0) uniform Params {
   vec4 a;   // res.x, res.y, flow, pupil
   vec4 b;   // gaze.x, gaze.y, center.x, center.y
   vec4 c;   // heat, flare, wide, dim
+  vec4 d;   // fade, size, unused, unused
 } P;
 
 #define uRes    P.a.xy
@@ -23,6 +25,8 @@ layout(set = 0, binding = 0) uniform Params {
 #define uFlare  P.c.y
 #define uWide   P.c.z
 #define uDim    P.c.w
+#define uFade   P.d.x   // whole-eye opacity, for opening and closing
+#define uSize   P.d.y   // whole-eye scale, for opening and closing
 #define fragXY  vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y)
 
 layout(location = 0) out vec4 outColor;
@@ -97,6 +101,9 @@ void main() {
   float px = 1.0 / min(uRes.x, uRes.y);
   vec2 p = (fragXY - 0.5 * uRes) * px;
   p -= uCenter;
+  // Grow from small while opening, shrink away while closing.
+  p /= uSize;
+  px /= uSize;
   float heat = clamp(uHeat + uFlare * 0.8, 0.0, 1.6);
   float wake = clamp(uWide, 0.0, 1.2);
 
@@ -191,5 +198,6 @@ void main() {
   float dimK = mix(1.0, 0.28, uDim);
   pm *= dimK;
   alpha *= mix(1.0, 0.75, uDim);
-  outColor = vec4(pm, alpha);
+  // Premultiplied, so fading is one multiply of colour and alpha together.
+  outColor = vec4(pm, alpha) * uFade;
 }

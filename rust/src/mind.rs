@@ -133,6 +133,9 @@ pub struct Frame {
 /// captured state each call (for example, push onto a list).
 pub type Say = Box<dyn FnMut(&'static str, Line)>;
 
+/// How long the eye takes to open at launch.
+const WAKE_SECS: f64 = 0.9;
+
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
     v.max(lo).min(hi)
 }
@@ -451,8 +454,9 @@ impl Mind {
             }
         }
 
-        // Wake up: the fire catches and the eye opens over the first seconds.
-        let wake = clamp(t / 2.5, 0.0, 1.0);
+        // Wake up: the fire catches and the eye opens over the first moment.
+        // mind.js took 2.5 s; 0.9 s matches the window's opening ease.
+        let wake = clamp(t / WAKE_SECS, 0.0, 1.0);
         let ease = 1.0 - (1.0 - wake).powi(3);
 
         self.gaze.x = approach(self.gaze.x, self.target.x, self.gaze_rate, dt);

@@ -4,7 +4,9 @@
 //! Flags:
 //!   --snap=MS        after MS milliseconds, save the frame to snap.png and quit
 //!   --backend=NAME   force `dx12` or `vulkan` instead of trying both
-//!   --blind          keep the camera off (the eye dims and drifts)
+//!   --blind          start blinded this run (camera and mic off), without saving it
+//!
+//! Left-drag moves the eye; right-click it (or the tray icon) for the menu.
 
 // In release builds, don't open a console window next to the eye.
 // `cfg_attr(condition, attribute)` applies the attribute only when the
@@ -15,14 +17,16 @@
 mod desktop;
 mod eye;
 mod mind;
+mod prefs;
 mod senses;
+mod tray;
 
 use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
@@ -30,9 +34,12 @@ use winit::window::{Window, WindowId, WindowLevel};
 use desktop::{Point, Rect};
 use eye::{Eye, EyeState};
 use mind::{Mind, Mode, Senses, World};
+use prefs::{Position, Prefs};
 use senses::Detector;
 use senses::camera::Eyes;
 use senses::face::YuNet;
+use senses::mic::Ears;
+use tray::{Action, Tray};
 
 /// Window size in logical pixels (scaled by the monitor's DPI), as in main.js.
 const WIN_SIZE: f64 = 320.0;
@@ -40,6 +47,12 @@ const WIN_SIZE: f64 = 320.0;
 const MARGIN: f64 = 24.0;
 /// The eye sits a little above center so whispers fit below it.
 const CENTER: [f32; 2] = [0.0, 0.06];
+/// Wait this long after the last move before saving where the eye was dropped.
+const SAVE_MOVE_AFTER: Duration = Duration::from_millis(400);
+/// How long the eye takes to open when it appears.
+const OPEN_SECS: f32 = 0.9;
+/// How long it takes to close before it hides or quits.
+const CLOSE_SECS: f32 = 0.6;
 /// Behind the eye in snap.png, so the flames are judged as on a desktop.
 const SNAP_BACKDROP: [u8; 3] = [0x1d, 0x1f, 0x24];
 
@@ -88,6 +101,47 @@ impl Args {
     }
 }
 
+/// What to do once the eye has finished closing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AfterClose {
+    Hide,
+    Quit,
+}
+
+/// The window's own life, apart from the mind's moods. An enum variant can
+/// carry data: `Opening` remembers when it started, `Closing` also what
+/// comes after.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Presence {
+    Opening(Instant),
+    Open,
+    Closing(Instant, AfterClose),
+    Hidden,
+}
+
+impl Presence {
+    /// How present the eye is, 0 (gone) to 1 (fully there), eased so it
+    /// starts quickly and settles softly.
+    fn amount(self) -> f32 {
+        match self {
+            Presence::Opening(since) => {
+                let x = (since.elapsed().as_secs_f32() / OPEN_SECS).min(1.0);
+                1.0 - (1.0 - x).powi(3) // ease out
+            }
+            Presence::Open => 1.0,
+            Presence::Closing(since, _) => {
+                let x = (since.elapsed().as_secs_f32() / CLOSE_SECS).min(1.0);
+                1.0 - x * x // ease in: slow to start, quick at the end
+            }
+            Presence::Hidden => 0.0,
+        }
+    }
+
+    fn shown(self) -> bool {
+        matches!(self, Presence::Opening(_) | Presence::Open)
+    }
+}
+
 /// The window and everything on the GPU that draws into it.
 struct Gpu {
     // `Arc` is a shared, reference-counted pointer. The surface needs the
@@ -111,8 +165,10 @@ impl Gpu {
         event_loop: &ActiveEventLoop,
         backend: Backend,
         allow_opaque: bool,
+        prefs: &Prefs,
     ) -> Result<Gpu, Box<dyn Error>> {
-        let window = Arc::new(event_loop.create_window(window_attributes(event_loop, backend))?);
+        let window =
+            Arc::new(event_loop.create_window(window_attributes(event_loop, backend, prefs))?);
 
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = match backend {
@@ -195,6 +251,41 @@ impl Gpu {
         (self.config.width, self.config.height)
     }
 
+    /// Presents one fully transparent frame. Done before the window is shown
+    /// and before it hides, so it never flashes an empty (black) surface.
+    fn clear(&mut self) {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            _ => return,
+        };
+        let view = frame.texture.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        // A pass that only clears to (0, 0, 0, 0): premultiplied nothing.
+        // The braces end the pass (dropping it) before `finish` needs the encoder.
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        self.queue.submit([encoder.finish()]);
+        self.window.pre_present_notify();
+        self.queue.present(frame);
+    }
+
     /// Draws one frame to the window.
     fn render(&mut self, state: &EyeState) {
         // `match` must handle every variant of the enum; `_` catches the rest.
@@ -217,11 +308,13 @@ impl Gpu {
     }
 }
 
-/// The eye's window: frameless, see-through, always on top, off the taskbar,
-/// in the top right corner of the primary monitor's work area.
+/// The eye's window: frameless, see-through, always on top, off the taskbar.
+/// It goes where it was last dragged, if that spot is still on a screen,
+/// else in the top right corner of the primary monitor's work area.
 fn window_attributes(
     event_loop: &ActiveEventLoop,
     backend: Backend,
+    prefs: &Prefs,
 ) -> winit::window::WindowAttributes {
     let scale = event_loop
         .primary_monitor()
@@ -237,7 +330,9 @@ fn window_attributes(
         .with_window_level(WindowLevel::AlwaysOnTop)
         .with_active(false)
         .with_visible(false);
-    if let Some(area) = desktop::work_area() {
+    if let Some(pos) = prefs.position.filter(|&p| on_some_screen(event_loop, p)) {
+        attrs = attrs.with_position(LogicalPosition::new(pos.x, pos.y));
+    } else if let Some(area) = desktop::work_area() {
         let x = area.x + area.width - side - MARGIN * scale;
         let y = area.y + MARGIN * scale;
         attrs = attrs.with_position(PhysicalPosition::new(x, y));
@@ -258,6 +353,17 @@ fn window_attributes(
     attrs
 }
 
+/// Whether a saved spot (logical pixels) still lands on a monitor, with the
+/// same 100 pixel slack main.js allowed. Monitors come and go.
+fn on_some_screen(event_loop: &ActiveEventLoop, p: Position) -> bool {
+    event_loop.available_monitors().any(|m| {
+        let k = m.scale_factor();
+        let (x, y) = (m.position().x as f64 / k, m.position().y as f64 / k);
+        let (w, h) = (m.size().width as f64 / k, m.size().height as f64 / k);
+        p.x >= x - 100.0 && p.x < x + w - 100.0 && p.y >= y - 100.0 && p.y < y + h - 100.0
+    })
+}
+
 /// The whole app. winit calls into it through `ApplicationHandler`.
 struct App {
     args: Args,
@@ -268,6 +374,13 @@ struct App {
     mode: Option<Mode>,
     /// The camera thread, while the eye is allowed to see.
     eyes: Option<Eyes>,
+    /// The microphone, while the eye is allowed to hear.
+    ears: Option<Ears>,
+    prefs: Prefs,
+    tray: Option<Tray>,
+    presence: Presence,
+    /// When to save the window's spot, a moment after the last move.
+    save_move_at: Option<Instant>,
     last_beat: Instant,
 }
 
@@ -301,7 +414,7 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f64().min(0.1);
         self.last_frame = now;
 
-        // What the camera saw last. No mic yet, so it hears silence.
+        // What the camera saw and the mic heard last.
         let (faces, can_see) = match &mut self.eyes {
             Some(eyes) => {
                 let sight = eyes.look();
@@ -314,10 +427,10 @@ impl App {
             &Senses {
                 faces: &faces,
                 can_see,
-                level: 0.0,
+                level: self.ears.as_ref().map_or(0.0, Ears::level),
                 world: Self::world(window),
-                blind: self.args.blind,
-                whispers: true,
+                blind: self.prefs.blind,
+                whispers: self.prefs.whispers,
             },
         );
 
@@ -333,8 +446,9 @@ impl App {
                     )
                 })
                 .unwrap_or_default();
+            let level = self.ears.as_ref().map(Ears::level);
             eprintln!(
-                "mode={:?} sight={can_see} faces={}{first}",
+                "mode={:?} sight={can_see} faces={}{first} level={level:.2?}",
                 s.mode,
                 faces.len()
             );
@@ -346,16 +460,129 @@ impl App {
             self.mode = Some(s.mode);
         }
 
+        // Opening, the eye grows and fades in with its pupil wide, then the
+        // pupil settles to what the mind wants. Closing, it narrows, cools,
+        // shrinks and fades to nothing.
+        let k = self.presence.amount();
+        let closing = matches!(self.presence, Presence::Closing(..));
+        let pupil = s.pupil as f32;
+        let pupil = if closing {
+            pupil * k
+        } else {
+            1.0 + (pupil - 1.0) * k
+        };
+        let cool = if closing { k } else { 1.0 };
+
         let secs = self.started.elapsed().as_secs_f32();
         EyeState {
             flow: (secs / 4.0) % 1.0,
             gaze: [s.gaze.x as f32, s.gaze.y as f32],
-            pupil: s.pupil as f32,
-            heat: s.heat as f32,
+            pupil,
+            heat: s.heat as f32 * cool,
             flare: s.flare as f32,
-            wide: s.wide as f32,
+            wide: s.wide as f32 * cool,
             dim: s.dim as f32,
             center: [CENTER[0] + s.shake.x as f32, CENTER[1] + s.shake.y as f32],
+            fade: k,
+            size: 0.75 + 0.25 * k,
+        }
+    }
+
+    /// Opens or closes the camera and mic together. Closing really stops the
+    /// devices: setting the Options to `None` drops the Eyes and Ears, and
+    /// their `Drop` code lets go of the hardware.
+    fn set_senses(&mut self, open: bool) {
+        if !open {
+            self.eyes = None;
+            self.ears = None;
+            eprintln!("senses closed");
+            return;
+        }
+        if self.eyes.is_none() {
+            self.eyes = Some(Eyes::open(|| {
+                let net = YuNet::new().map_err(|e| e.to_string())?;
+                Ok(Box::new(net) as Box<dyn Detector>)
+            }));
+        }
+        if self.ears.is_none() {
+            // `.map_err(..).ok()` logs a failure and carries on deaf:
+            // a missing sense never stops the eye.
+            self.ears = Ears::open()
+                .map_err(|err| eprintln!("no hearing: {err}"))
+                .ok();
+        }
+    }
+
+    /// Carries out one menu or tray click.
+    fn act(&mut self, action: Action, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = &self.gpu else { return };
+        let window = gpu.window.clone();
+        // A match arm can have a guard (`if ...`); arms are tried in order.
+        match action {
+            Action::Quit => self.close(AfterClose::Quit, event_loop),
+            Action::ToggleShown if self.presence.shown() => {
+                self.close(AfterClose::Hide, event_loop)
+            }
+            Action::ToggleShown => self.appear(),
+            Action::Blind(on) => {
+                self.prefs.blind = on;
+                self.set_senses(!on);
+            }
+            Action::Whispers(on) => self.prefs.whispers = on,
+            // Saved now; the voice itself arrives in the next milestone.
+            Action::Voice(on) => self.prefs.voice = on,
+            Action::ClickThrough(on) => {
+                self.prefs.click_through = on;
+                let _ = window.set_cursor_hittest(!on);
+            }
+        }
+        if action != Action::ToggleShown && action != Action::Quit {
+            self.prefs.save();
+        }
+        if let Some(tray) = &self.tray {
+            tray.refresh(&self.prefs, self.presence.shown());
+        }
+    }
+
+    /// Shows the window (after a clear frame, so no black box) and opens the eye.
+    fn appear(&mut self) {
+        if let Some(gpu) = &mut self.gpu
+            && self.presence == Presence::Hidden
+        {
+            gpu.clear();
+            gpu.window.set_visible(true);
+            gpu.window.request_redraw();
+        }
+        self.presence = Presence::Opening(Instant::now());
+    }
+
+    /// Starts closing the eye; the frame loop hides or quits once it's done.
+    fn close(&mut self, after: AfterClose, event_loop: &ActiveEventLoop) {
+        if self.presence == Presence::Hidden {
+            // Nothing on screen to animate.
+            if after == AfterClose::Quit {
+                event_loop.exit();
+            }
+            return;
+        }
+        self.presence = Presence::Closing(Instant::now(), after);
+    }
+
+    /// After a frame: finish an opening, or end a closing with a clear frame.
+    fn advance_presence(&mut self, gpu: &mut Gpu, event_loop: &ActiveEventLoop) {
+        match self.presence {
+            Presence::Opening(since) if since.elapsed().as_secs_f32() >= OPEN_SECS => {
+                self.presence = Presence::Open;
+            }
+            Presence::Closing(since, after) if since.elapsed().as_secs_f32() >= CLOSE_SECS => {
+                gpu.clear();
+                gpu.window.set_visible(false);
+                self.presence = Presence::Hidden;
+                if after == AfterClose::Quit {
+                    event_loop.exit();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -393,19 +620,18 @@ impl ApplicationHandler for App {
         // settle for an opaque eye rather than none at all.
         for allow_opaque in [false, true] {
             for &backend in &order {
-                match Gpu::new(event_loop, backend, allow_opaque) {
+                match Gpu::new(event_loop, backend, allow_opaque, &self.prefs) {
                     Ok(gpu) => {
-                        // A hidden window gets no redraw events, so show it
-                        // now; the surface is set up and starts out clear.
-                        gpu.window.set_visible(true);
-                        gpu.window.request_redraw();
+                        let _ = gpu.window.set_cursor_hittest(!self.prefs.click_through);
                         self.gpu = Some(gpu);
-                        if !self.args.blind {
-                            self.eyes = Some(Eyes::open(|| {
-                                let net = YuNet::new().map_err(|e| e.to_string())?;
-                                Ok(Box::new(net) as Box<dyn Detector>)
-                            }));
-                        }
+                        // Present a transparent frame, then show the window:
+                        // a window shown before its first frame flashes black.
+                        self.appear();
+                        // Without a tray the eye still works; it's just harder to reach.
+                        self.tray = Tray::new(&self.prefs)
+                            .map_err(|err| eprintln!("no tray icon: {err}"))
+                            .ok();
+                        self.set_senses(!self.prefs.blind);
                         return;
                     }
                     Err(err) => eprintln!("unblinking: {backend:?} failed: {err}"),
@@ -418,7 +644,7 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.close(AfterClose::Quit, event_loop),
             // Drag the eye anywhere with the left button.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -429,12 +655,18 @@ impl ApplicationHandler for App {
                     let _ = gpu.window.drag_window();
                 }
             }
-            // No tray menu yet, so a right click closes it.
+            // Right-click opens the same menu as the tray icon.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } => event_loop.exit(),
+            } => {
+                if let (Some(gpu), Some(tray)) = (&self.gpu, &self.tray) {
+                    tray.popup(&gpu.window);
+                }
+            }
+            // Remember where it was dropped, once the dragging stops.
+            WindowEvent::Moved(_) => self.save_move_at = Some(Instant::now() + SAVE_MOVE_AFTER),
             WindowEvent::RedrawRequested => {
                 let snap_due = self.args.snap.is_some_and(|d| self.started.elapsed() >= d);
                 // `take()` moves the Gpu out of the Option for a moment, so we
@@ -450,6 +682,7 @@ impl ApplicationHandler for App {
                     }
                     event_loop.exit();
                 }
+                self.advance_presence(&mut gpu, event_loop);
                 self.gpu = Some(gpu);
             }
             _ => {}
@@ -458,7 +691,25 @@ impl ApplicationHandler for App {
 
     /// After each batch of events: ask for the next frame. With vsync on,
     /// presenting blocks until the screen is ready, which paces the loop.
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // `map_or_else(Vec::new, ..)`: no tray, no clicks.
+        let actions = self.tray.as_ref().map_or_else(Vec::new, Tray::poll);
+        for action in actions {
+            self.act(action, event_loop);
+        }
+        if self.save_move_at.is_some_and(|t| Instant::now() >= t) {
+            self.save_move_at = None;
+            if let Some(gpu) = &self.gpu
+                && let Ok(pos) = gpu.window.outer_position()
+            {
+                let logical = pos.to_logical::<f64>(gpu.window.scale_factor());
+                self.prefs.position = Some(Position {
+                    x: logical.x,
+                    y: logical.y,
+                });
+                self.prefs.save();
+            }
+        }
         if let Some(gpu) = &self.gpu {
             gpu.window.request_redraw();
         }
@@ -503,14 +754,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     // For now the mind's whispers go to the terminal.
     let say: mind::Say = Box::new(|text, kind| eprintln!("whisper ({kind:?}): {text}"));
     let now = Instant::now();
+    let args = Args::parse();
+    let mut prefs = Prefs::load();
+    // --blind blinds this run only; the saved pref is untouched unless the
+    // menu changes something.
+    prefs.blind |= args.blind;
     let mut app = App {
-        args: Args::parse(),
+        args,
         gpu: None,
         started: now,
         last_frame: now,
         mind: Mind::new(say),
         mode: None,
         eyes: None,
+        ears: None,
+        prefs,
+        tray: None,
+        presence: Presence::Hidden,
+        save_move_at: None,
         last_beat: now,
     };
     event_loop.run_app(&mut app)?;

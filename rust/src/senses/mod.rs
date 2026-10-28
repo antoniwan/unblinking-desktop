@@ -4,6 +4,7 @@
 
 pub mod camera;
 pub mod face;
+pub mod mic;
 
 use image::RgbImage;
 

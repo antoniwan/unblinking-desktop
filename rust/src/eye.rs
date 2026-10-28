@@ -18,6 +18,10 @@ pub struct EyeState {
     pub wide: f32,
     pub dim: f32,
     pub center: [f32; 2],
+    /// Whole-eye opacity, 0..1: the app's opening and closing fades.
+    pub fade: f32,
+    /// Whole-eye scale: below 1 while it opens or closes.
+    pub size: f32,
 }
 
 /// The uniform block exactly as the GPU sees it (see `Params` in eye.frag).
@@ -31,6 +35,7 @@ struct Uniforms {
     a: [f32; 4],
     b: [f32; 4],
     c: [f32; 4],
+    d: [f32; 4],
 }
 
 impl Uniforms {
@@ -39,6 +44,7 @@ impl Uniforms {
             a: [size.0 as f32, size.1 as f32, s.flow, s.pupil],
             b: [s.gaze[0], s.gaze[1], s.center[0], s.center[1]],
             c: [s.heat, s.flare, s.wide, s.dim],
+            d: [s.fade, s.size, 0.0, 0.0],
         }
     }
 }

@@ -14,6 +14,16 @@ Done so far:
   face detector, through tract (pure Rust, on the CPU) about 15 times a
   second. When it finds you, the eye locks on. The model is built into the
   exe, and frames stay in memory only.
+- Hearing. The default mic, reduced to one loudness number (cpal), feeds the
+  flames and makes the eye flinch at a bang.
+- The tray icon and its menu, which also opens when you right-click the eye:
+  show or hide, blind (camera and mic really stop), whispers, voice (saved
+  only for now), click-through, and banish.
+- Prefs saved in Electron's own file and keys (`%APPDATA%\Unblinking\prefs.json`),
+  including where you last dropped the eye.
+- Opening and closing. The eye eases open over 0.9 s, and fades out over
+  0.6 s before it hides or quits. The window only shows after a transparent
+  first frame, so there's no black box.
 
 ## Run it
 
@@ -21,14 +31,14 @@ Done so far:
 cargo run --release
 ```
 
-Drag the eye with the left mouse button. Right-click closes it (there is no
-tray menu yet).
+Drag the eye with the left mouse button. Right-click it, or the tray icon, for
+the menu. A left click on the tray icon shows or hides it.
 
 | Flag | What it does |
 | --- | --- |
 | `--snap=MS` | After MS milliseconds, saves the frame over a dark backdrop to `snap.png` in the current folder, then quits. |
 | `--backend=dx12` or `--backend=vulkan` | Uses only that backend. By default it tries DX12 first, then Vulkan. |
-| `--blind` | Keeps the camera off. The eye dims and drifts. |
+| `--blind` | Starts blinded for this run only (camera and mic off), without saving it. |
 
 ```bash
 cargo test
@@ -59,5 +69,8 @@ as a fallback.
 | `src/mind.rs` | The mind's modes, moods and whispers, plus their tests |
 | `src/desktop.rs` | The cursor position and work area, read from Windows |
 | `src/senses/camera.rs` | The camera thread and the channel that brings its reports back |
+| `src/senses/mic.rs` | The mic stream and its loudness, shared through an atomic |
+| `src/prefs.rs` | Loading and saving prefs.json |
+| `src/tray.rs` | The tray icon, the menu, and the right-click popup |
 | `src/senses/face.rs` | YuNet through tract, and the box decoding and NMS that MediaPipe used to do |
 | `assets/` | The face model and its license note |
