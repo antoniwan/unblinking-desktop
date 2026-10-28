@@ -4,6 +4,7 @@
 //! Flags:
 //!   --snap=MS        after MS milliseconds, save the frame to snap.png and quit
 //!   --backend=NAME   force `dx12` or `vulkan` instead of trying both
+//!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
 //!   --blind          start blinded this run (camera and mic off), without saving it
 //!
 //! Left-drag moves the eye; right-click it (or the tray icon) for the menu.
@@ -17,6 +18,7 @@
 mod desktop;
 mod eye;
 mod mind;
+mod moods;
 mod prefs;
 mod senses;
 mod tray;
@@ -33,7 +35,11 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use desktop::{Point, Rect};
 use eye::{Eye, EyeState};
-use mind::{Mind, Mode, Senses, World};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use mind::{Line, Mind, Mode, Senses, World};
+use moods::Moods;
 use prefs::{Position, Prefs};
 use senses::Detector;
 use senses::camera::Eyes;
@@ -67,6 +73,7 @@ struct Args {
     snap: Option<Duration>,
     backend: Option<Backend>,
     blind: bool,
+    mood: Option<String>,
 }
 
 impl Args {
@@ -75,6 +82,7 @@ impl Args {
             snap: None,
             backend: None,
             blind: false,
+            mood: None,
         };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
@@ -91,6 +99,8 @@ impl Args {
                         None
                     }
                 };
+            } else if let Some(name) = arg.strip_prefix("--mood=") {
+                args.mood = Some(name.to_string());
             } else if arg == "--blind" {
                 args.blind = true;
             } else {
@@ -382,6 +392,16 @@ struct App {
     /// When to save the window's spot, a moment after the last move.
     save_move_at: Option<Instant>,
     last_beat: Instant,
+    moods: Moods,
+    /// The flame drift's looping phase, 0..1, advanced at the mood's speed.
+    flow: f32,
+    /// The latest whisper and when, shared with the mind's `say` closure.
+    /// `Rc<Cell<..>>`: both own it (Rc), and a Copy value inside a Cell can
+    /// be swapped even through a shared handle.
+    last_said: Rc<Cell<Option<(Line, Instant)>>>,
+    /// When it last saw a face, and when it last heard anything louder than quiet.
+    last_face: Option<Instant>,
+    last_noise: Instant,
 }
 
 impl App {
@@ -448,8 +468,9 @@ impl App {
                 .unwrap_or_default();
             let level = self.ears.as_ref().map(Ears::level);
             eprintln!(
-                "mode={:?} sight={can_see} faces={}{first} level={level:.2?}",
+                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?}",
                 s.mode,
+                self.moods.current().name,
                 faces.len()
             );
         }
@@ -459,6 +480,20 @@ impl App {
             eprintln!("mode: {:?}", s.mode);
             self.mode = Some(s.mode);
         }
+
+        // The mood: which of the studio's looks fits what's happening.
+        let level = self.ears.as_ref().map_or(0.0, Ears::level);
+        if !faces.is_empty() {
+            self.last_face = Some(now);
+        }
+        if level > 0.3 {
+            self.last_noise = now;
+        }
+        // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
+        let mood = self.args.mood.as_deref().unwrap_or_else(|| self.choose_mood(&s, &faces));
+        self.moods.set(mood);
+        let look = self.moods.now();
+        self.flow = (self.flow + dt as f32 * look.flow) % 1.0;
 
         // Opening, the eye grows and fades in with its pupil wide, then the
         // pupil settles to what the mind wants. Closing, it narrows, cools,
@@ -473,18 +508,62 @@ impl App {
         };
         let cool = if closing { k } else { 1.0 };
 
-        let secs = self.started.elapsed().as_secs_f32();
+        // The mind's numbers carry the moment; the mood scales them. Heat is
+        // relative to Watchful's 0.55, so Watchful leaves it as the mind set it.
+        let jitter = (look.shake + s.flare as f32 * 0.5) * 0.006;
+        let shake = [
+            s.shake.x as f32 + (fastrand::f32() - 0.5) * jitter,
+            s.shake.y as f32 + (fastrand::f32() - 0.5) * jitter,
+        ];
         EyeState {
-            flow: (secs / 4.0) % 1.0,
+            flow: self.flow,
             gaze: [s.gaze.x as f32, s.gaze.y as f32],
             pupil,
-            heat: s.heat as f32 * cool,
+            heat: s.heat as f32 * look.heat / 0.55 * cool,
             flare: s.flare as f32,
-            wide: s.wide as f32 * cool,
-            dim: s.dim as f32,
-            center: [CENTER[0] + s.shake.x as f32, CENTER[1] + s.shake.y as f32],
+            wide: s.wide as f32 * look.wake * cool,
+            dim: (s.dim as f32).max(look.dim),
+            center: [CENTER[0] + shake[0], CENTER[1] + shake[1]],
             fade: k,
             size: 0.75 + 0.25 * k,
+            colors: look.display_colors(),
+            swirl: look.swirl,
+            glow: look.glow,
+            embers: look.embers,
+        }
+    }
+
+    /// Picks the mood from the studio's triggers, most urgent first.
+    fn choose_mood(&self, s: &mind::Frame, faces: &[mind::Face]) -> &'static str {
+        let said_lately = |kinds: &[Line], secs: f32| {
+            self.last_said.get().is_some_and(|(kind, at)| {
+                kinds.contains(&kind) && at.elapsed().as_secs_f32() < secs
+            })
+        };
+        let no_face_for = self
+            .last_face
+            .map_or(self.started.elapsed(), |t| t.elapsed());
+        let hour = desktop::local_hour();
+        let late = !(6..23).contains(&hour);
+        let quiet = self.last_noise.elapsed() > Duration::from_secs(120);
+        let too_close = faces.iter().any(|f| f.score > 0.55 && f.size > 0.5);
+
+        if s.mode == Mode::Blind {
+            "Blinded"
+        } else if said_lately(&[Line::Loud], 3.0) || too_close {
+            "Wrathful"
+        } else if said_lately(&[Line::Returned, Line::First], 4.0) {
+            "Delighted"
+        } else if faces.iter().filter(|f| f.score > 0.55).count() > 1 {
+            "Suspicious"
+        } else if late && quiet {
+            "Drowsy"
+        } else if s.mode == Mode::Locked {
+            "Watchful"
+        } else if no_face_for > Duration::from_secs(60) {
+            "Lonely"
+        } else {
+            "Curious"
         }
     }
 
@@ -751,8 +830,14 @@ fn alpha_census(rgba: &[u8]) -> (usize, usize, usize) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
-    // For now the mind's whispers go to the terminal.
-    let say: mind::Say = Box::new(|text, kind| eprintln!("whisper ({kind:?}): {text}"));
+    // For now the mind's whispers go to the terminal; the app also notes the
+    // latest one, because some moods follow what was just said.
+    let last_said = Rc::new(Cell::new(None));
+    let heard = Rc::clone(&last_said);
+    let say: mind::Say = Box::new(move |text, kind| {
+        eprintln!("whisper ({kind:?}): {text}");
+        heard.set(Some((kind, Instant::now())));
+    });
     let now = Instant::now();
     let args = Args::parse();
     let mut prefs = Prefs::load();
@@ -773,6 +858,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         presence: Presence::Hidden,
         save_move_at: None,
         last_beat: now,
+        moods: Moods::load(),
+        flow: 0.0,
+        last_said,
+        last_face: None,
+        last_noise: now,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

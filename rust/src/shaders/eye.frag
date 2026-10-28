@@ -1,19 +1,29 @@
 #version 450
-// The eye's fragment shader, carried over from renderer/eye.js.
-// The body below main() is the WebGL shader unchanged except for these spots:
+// The Burning Eye: the "v2 wrapped" fire from the Blinki Studio.
+// The fire lives IN the sphere: noise is sampled in 3D on its surface, so it
+// wraps and foreshortens with the ball, and a hotter inner layer shows
+// through the dark veins for depth. The pupil is solid: dark all the way
+// through, with a soft inky edge and a thin hot lip where the fire meets it.
+// Outside the circle there is only light: a soft glow and rising embers.
+//
+// Differences from the studio's WebGL source:
 //   - uniforms live in one uniform block (wgpu has no loose uniforms),
-//   - wgpu's gl_FragCoord starts at the top left, WebGL's at the bottom left,
-//     so `fragXY` flips y back,
-//   - the result goes to `outColor` instead of gl_FragColor,
-//   - uFade and uSize let the app ease the whole eye in and out.
+//   - wgpu's gl_FragCoord starts at the top left, WebGL's at the bottom
+//     left, so `fragXY` flips y back,
+//   - uFade and uSize let the app ease the whole eye in and out,
+//   - the result goes to `outColor` instead of gl_FragColor.
 // naga (wgpu's shader translator) compiles this GLSL for DX12 or Vulkan.
 
-// Three vec4s keep the std140 layout simple; must match `Uniforms` in eye.rs.
+// vec4s keep the std140 layout simple; must match `Uniforms` in eye.rs.
 layout(set = 0, binding = 0) uniform Params {
   vec4 a;   // res.x, res.y, flow, pupil
   vec4 b;   // gaze.x, gaze.y, center.x, center.y
   vec4 c;   // heat, flare, wide, dim
   vec4 d;   // fade, size, unused, unused
+  vec4 e;   // mood colour 0 (deep fire), swirl
+  vec4 f;   // mood colour 1 (flame), glow strength
+  vec4 g;   // mood colour 2 (hot core), ember amount
+  vec4 h;   // mood colour 3 (glow), unused
 } P;
 
 #define uRes    P.a.xy
@@ -27,6 +37,13 @@ layout(set = 0, binding = 0) uniform Params {
 #define uDim    P.c.w
 #define uFade   P.d.x   // whole-eye opacity, for opening and closing
 #define uSize   P.d.y   // whole-eye scale, for opening and closing
+#define uC0     P.e.rgb
+#define uSwirl  P.e.w
+#define uC1     P.f.rgb
+#define uGlowK  P.f.w
+#define uC2     P.g.rgb
+#define uEmberK P.g.w
+#define uCG     P.h.rgb
 #define fragXY  vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y)
 
 layout(location = 0) out vec4 outColor;
@@ -48,12 +65,28 @@ float noise(vec2 p) {
              mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
 }
 
-float fbm(vec2 p) {
+float hash3(vec3 p) {
+  p = fract(p * 0.3183099 + 0.1);
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float noise3(vec3 x) {
+  vec3 i = floor(x);
+  vec3 f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash3(i), hash3(i + vec3(1.0, 0.0, 0.0)), f.x),
+                 mix(hash3(i + vec3(0.0, 1.0, 0.0)), hash3(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+             mix(mix(hash3(i + vec3(0.0, 0.0, 1.0)), hash3(i + vec3(1.0, 0.0, 1.0)), f.x),
+                 mix(hash3(i + vec3(0.0, 1.0, 1.0)), hash3(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+}
+
+float fbm3(vec3 p) {
   float v = 0.0;
   float a = 0.5;
   for (int i = 0; i < 4; i++) {
-    v += a * noise(p);
-    p = p * 2.03 + vec2(1.7, 9.2);
+    v += a * noise3(p);
+    p = p * 2.02 + vec3(1.7, 9.2, 3.1);
     a *= 0.5;
   }
   return v;
@@ -61,19 +94,23 @@ float fbm(vec2 p) {
 
 // Noise that drifts along dir forever without its coordinates growing:
 // two copies offset by a looping phase, crossfaded so the wrap never shows.
-float flowNoise(vec2 p, vec2 dir) {
+float flow3(vec3 p, vec3 dir) {
   float a = uFlow;
   float b = fract(uFlow + 0.5);
-  float na = fbm(p + dir * a * 3.0);
-  float nb = fbm(p + dir * b * 3.0 + vec2(31.7, 17.3));
+  float na = fbm3(p + dir * a * 2.0);
+  float nb = fbm3(p + dir * b * 2.0 + vec3(31.7, 17.3, 5.1));
   float wa = 1.0 - abs(2.0 * a - 1.0);
   return mix(nb, na, wa);
 }
 
-// Black body ramp: deep red, orange, yellow, white hot.
+// The mood's palette in place of a fixed black-body ramp:
+// deep, flame, hot core, then a white tip.
 vec3 fire(float t) {
   t = max(t, 0.0);
-  return vec3(min(1.0, t * 1.7), clamp(t * t * 1.25, 0.0, 1.0), clamp(pow(t, 4.0) * 0.9, 0.0, 1.0));
+  vec3 c = mix(vec3(0.0), uC0, smoothstep(0.0, 0.35, t));
+  c = mix(c, uC1, smoothstep(0.3, 0.7, t));
+  c = mix(c, uC2, smoothstep(0.65, 1.0, t));
+  return mix(c, vec3(1.0, 0.98, 0.94), smoothstep(1.05, 1.5, t));
 }
 
 // One layer of rising sparks. Cells scroll up a whole number of cells per
@@ -104,7 +141,7 @@ void main() {
   // Grow from small while opening, shrink away while closing.
   p /= uSize;
   px /= uSize;
-  float heat = clamp(uHeat + uFlare * 0.8, 0.0, 1.6);
+  float heat = clamp(uHeat + uFlare * 0.8, 0.0, 1.8);
   float wake = clamp(uWide, 0.0, 1.2);
 
   float rr = length(p);
@@ -118,14 +155,15 @@ void main() {
   vec2 spin = vec2(cos(TAU * uFlow), sin(TAU * uFlow));
   float breath = 0.8 + 0.4 * noise(dirv * 2.2 + spin * 0.9 + 4.0);
   float dOut = max(dist, 0.0);
-  float halo = exp(-dOut * 24.0) * (0.30 + 0.35 * heat);
-  float corona = exp(-dOut * 7.0) * (0.10 + 0.16 * heat) * breath;
-  float glow = (halo + corona) * (0.35 + 0.65 * wake);
-  vec3 glowCol = mix(vec3(0.75, 0.10, 0.01), vec3(1.0, 0.42, 0.08), exp(-dOut * 14.0));
+  float gk = max(uGlowK, 0.05);
+  float halo = exp(-dOut * 24.0 / gk) * (0.30 + 0.35 * heat);
+  float corona = exp(-dOut * 7.0 / gk) * (0.10 + 0.16 * heat) * breath;
+  float glow = (halo + corona) * (0.35 + 0.65 * wake) * min(gk, 1.0);
+  vec3 glowCol = mix(uCG * 0.75, uCG, exp(-dOut * 14.0));
 
   // Embers rise from the sphere: born near its surface, strongest above it,
-  // fading as they climb. Their number follows the heat.
-  float density = 0.10 + 0.45 * clamp(heat, 0.0, 1.0) + 0.3 * uFlare;
+  // fading as they climb. Their number follows the heat and the mood.
+  float density = (0.10 + 0.45 * clamp(heat, 0.0, 1.0) + 0.3 * uFlare) * uEmberK;
   float sp = embers(p, 22.0, 8.0, 8.0, 0.0, density)
            + embers(p, 34.0, 12.0, 12.0, 3.1, density) * 0.7
            + embers(p, 15.0, 6.0, 6.0, 7.7, density * 0.8) * 1.2;
@@ -133,7 +171,7 @@ void main() {
   float band = smoothstep(0.004, 0.03, dist) * (1.0 - smoothstep(0.02, 0.10 + 0.14 * clamp(heat, 0.0, 1.0), dist));
   float width = 1.0 - smoothstep(R * 0.6, R * 1.25, abs(p.x));
   sp *= band * above * width * wake;
-  vec3 spCol = fire(0.7 + 0.12 * min(heat, 1.0));
+  vec3 spCol = fire(0.85 + 0.12 * min(heat, 1.0));
 
   vec3 outPm = glowCol * glow + spCol * sp;
   float outA = clamp(glow * 0.85 + sp, 0.0, 1.0);
@@ -148,40 +186,48 @@ void main() {
   vec3 up = cross(A, rt);
   vec3 l = vec3(dot(n, rt), dot(n, up), dot(n, A));   // surface point in eye space
 
-  // Fire on the surface, streaming outward from the pupil.
-  float s = length(l.xy);
-  vec2 radial = l.xy / max(s, 1e-3);
-  float swirl = flowNoise(l.xy * 3.2, -radial * 0.6);
-  float fibers = noise(radial * 6.0 + 3.3) * 0.75 + noise(radial * 13.0 + 1.1) * 0.25;
-  float front = smoothstep(-0.3, 1.0, l.z);
-  float ang = atan(s, l.z) / 3.14159;                  // 0 at the pupil, 1 at the far pole
-  float it = 0.92 - ang * 1.05
-           + (swirl - 0.5) * 1.5 + (fibers - 0.5) * 0.4 * front
-           + heat * 0.14;
+  // A second, smaller sphere inside: the deeper, hotter layer.
+  float k = 0.88;
+  float r2 = dot(p / R, p / R);
+  vec3 nIn = r2 < k * k ? vec3(p / R, sqrt(k * k - r2)) / k : n;
+  vec3 li = vec3(dot(nIn, rt), dot(nIn, up), dot(nIn, A));
+  float ang = acos(clamp(l.z, -1.0, 1.0)) / 3.14159;      // 0 at the pupil, 1 at the far pole
+  float angIn = acos(clamp(li.z, -1.0, 1.0)) / 3.14159;
+  float outer = flow3(l * uSwirl * 1.1, vec3(0.0, 0.0, 1.0));
+  float inner = flow3(li * uSwirl * 0.7 + vec3(11.0), vec3(0.0, 0.0, 0.7));
+  vec2 radial = l.xy / max(length(l.xy), 1e-3);
+  float fibers = noise(radial * 7.0 + 3.3) * 0.7 + noise(radial * 15.0 + 1.1) * 0.3;
+  float itO = 0.88 - ang * 1.1 + (outer - 0.5) * 1.4 + (fibers - 0.5) * 0.6 * smoothstep(-0.3, 1.0, l.z) + heat * 0.14;
+  float itI = 0.95 - angIn * 1.0 + (inner - 0.5) * 1.0 + heat * 0.18;
+  float veil = smoothstep(0.32, 0.62, outer);              // where the outer flames thin, see the inner
+  float it = mix(itI * 0.7, itO, veil);
   it *= 0.55 + 0.45 * wake;
-  it = 1.06 * (1.0 - exp(-max(it, 0.0) * 1.9));       // soft cap: hot, not blown out
-  it *= 0.55 + 0.45 * smoothstep(0.28, 0.62, swirl);  // dark veins in the fire
-  it += exp(-ang * 7.0) * (0.32 + 0.2 * heat) * wake;  // the iris burns hottest round the pupil
+  it = 1.06 * (1.0 - exp(-max(it, 0.0) * 1.9));            // soft cap: hot, not blown out
+  it *= 0.45 + 0.55 * smoothstep(0.25, 0.6, max(outer, inner * 0.8));
+  it += exp(-ang * 5.0) * (0.38 + 0.22 * heat) * wake;     // hottest round the pupil
   vec3 ecol = fire(it);
 
-  // The slit pupil, painted on the sphere so it foreshortens near the limb.
-  float pxl = px / (R * max(z, 0.08));                 // one pixel, in surface units
+  // The solid pupil, painted on the surface so it foreshortens with the ball.
+  float pxl = px / (R * max(z, 0.08));                     // one pixel, in surface units
   float h = 0.78;
   float w = mix(0.025, 0.24, clamp(uPupil, 0.0, 1.0));
+  float onFront = smoothstep(0.0, 0.12, l.z);
   float py = clamp(l.y / h, -1.0, 1.0);
   float slit = w * pow(max(0.0, 1.0 - py * py), 0.7);
   float pd = abs(l.x) - slit;
-  float onFront = smoothstep(0.0, 0.12, l.z);
-  float pupil = (1.0 - smoothstep(-pxl, pxl, pd)) * (1.0 - smoothstep(h - 0.06, h, abs(l.y))) * onFront;
-  float ring = exp(-max(pd, 0.0) * 22.0) * (1.0 - pupil) * onFront * (1.0 - smoothstep(h * 0.7, h * 1.05, abs(l.y)));
-  ecol += vec3(1.0, 0.8, 0.45) * ring * (0.35 + 0.45 * heat) * wake;
-  vec3 pupilCol = mix(vec3(0.0), vec3(0.09, 0.008, 0.0), smoothstep(-0.05, 0.0, pd));
+  float vmask = (1.0 - smoothstep(h - 0.08, h, abs(l.y))) * onFront;
+  float pupil = (1.0 - smoothstep(-pxl, pxl, pd)) * vmask;
+  float ink = (1.0 - smoothstep(0.0, 0.05 + 0.03 * w, pd)) * vmask * (1.0 - pupil);
+  float lip = exp(-max(pd, 0.0) * 26.0) * (1.0 - pupil) * vmask;
+  ecol *= 1.0 - 0.55 * ink;
+  ecol += fire(1.15) * lip * (0.22 + 0.35 * heat) * wake;
+  vec3 pupilCol = mix(vec3(0.0), uC0 * 0.08, smoothstep(-slit * 0.9, 0.0, pd));
   ecol = mix(ecol, pupilCol, pupil);
 
-  // Limb darkening, then a thin fresnel rim of hotter light at the edge.
+  // Limb darkening, then a thin fresnel rim of the mood's glow at the edge.
   ecol *= mix(0.38, 1.0, sqrt(z));
   float fres = pow(1.0 - z, 4.0);
-  ecol += vec3(1.0, 0.45, 0.1) * fres * (0.35 + 0.5 * heat) * (0.4 + 0.6 * wake);
+  ecol += uCG * fres * (0.35 + 0.5 * heat) * (0.4 + 0.6 * wake);
 
   float inside = 1.0 - smoothstep(-px, px, dist);
 

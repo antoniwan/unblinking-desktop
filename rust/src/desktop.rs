@@ -68,6 +68,20 @@ pub fn work_area() -> Option<Rect> {
     })
 }
 
+/// The hour of the day on the local clock, 0..23.
+#[cfg(windows)]
+pub fn local_hour() -> u32 {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    // Some Win32 calls simply return a struct and can't fail.
+    let now = unsafe { GetLocalTime() };
+    now.wHour as u32
+}
+
+#[cfg(not(windows))]
+pub fn local_hour() -> u32 {
+    12
+}
+
 #[cfg(not(windows))]
 pub fn cursor() -> Option<Point> {
     None

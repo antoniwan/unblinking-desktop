@@ -22,6 +22,14 @@ pub struct EyeState {
     pub fade: f32,
     /// Whole-eye scale: below 1 while it opens or closes.
     pub size: f32,
+    /// The mood's palette: deep fire, flame, hot core, glow.
+    pub colors: [[f32; 3]; 4],
+    /// How finely the flames swirl.
+    pub swirl: f32,
+    /// How far the glow reaches.
+    pub glow: f32,
+    /// How many embers rise.
+    pub embers: f32,
 }
 
 /// The uniform block exactly as the GPU sees it (see `Params` in eye.frag).
@@ -36,6 +44,10 @@ struct Uniforms {
     b: [f32; 4],
     c: [f32; 4],
     d: [f32; 4],
+    e: [f32; 4],
+    f: [f32; 4],
+    g: [f32; 4],
+    h: [f32; 4],
 }
 
 impl Uniforms {
@@ -45,8 +57,17 @@ impl Uniforms {
             b: [s.gaze[0], s.gaze[1], s.center[0], s.center[1]],
             c: [s.heat, s.flare, s.wide, s.dim],
             d: [s.fade, s.size, 0.0, 0.0],
+            e: with(s.colors[0], s.swirl),
+            f: with(s.colors[1], s.glow),
+            g: with(s.colors[2], s.embers),
+            h: with(s.colors[3], 0.0),
         }
     }
+}
+
+/// A colour plus one more number, packed into a vec4 slot.
+fn with([r, g, b]: [f32; 3], w: f32) -> [f32; 4] {
+    [r, g, b, w]
 }
 
 /// Everything needed to draw the eye into a texture of one format.
