@@ -30,6 +30,9 @@ pub struct Prefs {
     pub position: Option<Position>,
     /// The "Look at me" calibration, in metres (Rust app only).
     pub look_offset: Option<Position>,
+    /// Music, Voice and FX, each with a mute and a volume (Rust app only).
+    /// Electron's "voice" key is kept in step with it.
+    pub sound: crate::sound::Sound,
     /// Where the webcam sits, from "Where's my camera?" (Rust app only).
     pub camera: Option<crate::placement::CameraSpot>,
     /// Get out of the way of full-screen games, videos and presentations
@@ -51,6 +54,7 @@ impl Default for Prefs {
             camera: None,
             hide_fullscreen: true,
             wake_word: false,
+            sound: crate::sound::Sound::default(),
         }
     }
 }
@@ -121,6 +125,12 @@ impl Prefs {
         };
         prefs.position = point("position");
         prefs.look_offset = point("lookOffset");
+        // No mixer saved yet: carry the old single Voice toggle over.
+        prefs.sound = saved
+            .get("sound")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| crate::sound::Sound::from_old_voice(prefs.voice));
         prefs.camera = saved
             .get("camera")
             .cloned()
@@ -249,6 +259,7 @@ mod tests {
             }),
             hide_fullscreen: false,
             wake_word: true,
+            sound: crate::sound::Sound::default(),
         };
         let text = serde_json::to_string_pretty(&p).unwrap();
         assert_eq!(Prefs::from_json(&text), p);

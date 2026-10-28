@@ -3,11 +3,32 @@
 
 use std::error::Error;
 
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::window::Window;
 
 use crate::prefs::Prefs;
+
+/// The mixer's switches.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Channel {
+    Master,
+    Music,
+    Voice,
+    Fx,
+}
+
+impl Channel {
+    /// Flips this channel's switch in a mixer.
+    pub fn set(self, sound: &mut crate::sound::Sound, on: bool) {
+        match self {
+            Channel::Master => sound.master = on,
+            Channel::Music => sound.music = on,
+            Channel::Voice => sound.voice = on,
+            Channel::Fx => sound.fx = on,
+        }
+    }
+}
 
 /// What the user asked for. The app decides what each one means; this
 /// module only turns clicks into these.
@@ -16,7 +37,8 @@ pub enum Action {
     ToggleShown,
     Blind(bool),
     Whispers(bool),
-    Voice(bool),
+    /// A sound channel switched on or off.
+    Mute(Channel, bool),
     ClickThrough(bool),
     /// Listen for "Hey, OG Blinki".
     WakeWord(bool),
@@ -40,7 +62,10 @@ pub struct Tray {
     shown: MenuItem,
     blind: CheckMenuItem,
     whispers: CheckMenuItem,
-    voice: CheckMenuItem,
+    sound_master: CheckMenuItem,
+    sound_music: CheckMenuItem,
+    sound_voice: CheckMenuItem,
+    sound_fx: CheckMenuItem,
     click_through: CheckMenuItem,
     wake_word: CheckMenuItem,
     look_at_me: MenuItem,
@@ -57,7 +82,17 @@ impl Tray {
         let shown = MenuItem::new("Hide the eye", true, None);
         let blind = CheckMenuItem::new("Blind it (camera and mic off)", true, prefs.blind, None);
         let whispers = CheckMenuItem::new("Whispers", true, prefs.whispers, None);
-        let voice = CheckMenuItem::new("Voice", true, prefs.voice, None);
+        let s = prefs.sound;
+        let sound_master = CheckMenuItem::new("Sound on", true, s.master, None);
+        let sound_music = CheckMenuItem::new("Music (the drone)", true, s.music, None);
+        let sound_voice = CheckMenuItem::new("Voice (spoken whispers)", true, s.voice, None);
+        let sound_fx = CheckMenuItem::new("Effects", true, s.fx, None);
+        let sound = Submenu::new("Sound", true);
+        sound.append(&sound_master)?;
+        sound.append(&PredefinedMenuItem::separator())?;
+        sound.append(&sound_music)?;
+        sound.append(&sound_voice)?;
+        sound.append(&sound_fx)?;
         let click_through =
             CheckMenuItem::new("Let clicks pass through", true, prefs.click_through, None);
         let wake_word = CheckMenuItem::new("Wake on 'Hey, OG Blinki'", true, prefs.wake_word, None);
@@ -84,7 +119,7 @@ impl Tray {
         menu.append(&shown)?;
         menu.append(&blind)?;
         menu.append(&whispers)?;
-        menu.append(&voice)?;
+        menu.append(&sound)?;
         menu.append(&click_through)?;
         menu.append(&wake_word)?;
         menu.append(&autostart)?;
@@ -111,7 +146,10 @@ impl Tray {
             shown,
             blind,
             whispers,
-            voice,
+            sound_master,
+            sound_music,
+            sound_voice,
+            sound_fx,
             click_through,
             wake_word,
             look_at_me,
@@ -138,8 +176,14 @@ impl Tray {
                 Action::Blind(self.blind.is_checked())
             } else if id == self.whispers.id() {
                 Action::Whispers(self.whispers.is_checked())
-            } else if id == self.voice.id() {
-                Action::Voice(self.voice.is_checked())
+            } else if id == self.sound_master.id() {
+                Action::Mute(Channel::Master, self.sound_master.is_checked())
+            } else if id == self.sound_music.id() {
+                Action::Mute(Channel::Music, self.sound_music.is_checked())
+            } else if id == self.sound_voice.id() {
+                Action::Mute(Channel::Voice, self.sound_voice.is_checked())
+            } else if id == self.sound_fx.id() {
+                Action::Mute(Channel::Fx, self.sound_fx.is_checked())
             } else if id == self.click_through.id() {
                 Action::ClickThrough(self.click_through.is_checked())
             } else if id == self.wake_word.id() {
@@ -189,7 +233,10 @@ impl Tray {
         });
         self.blind.set_checked(prefs.blind);
         self.whispers.set_checked(prefs.whispers);
-        self.voice.set_checked(prefs.voice);
+        self.sound_master.set_checked(prefs.sound.master);
+        self.sound_music.set_checked(prefs.sound.music);
+        self.sound_voice.set_checked(prefs.sound.voice);
+        self.sound_fx.set_checked(prefs.sound.fx);
         self.click_through.set_checked(prefs.click_through);
         self.hide_fullscreen.set_checked(prefs.hide_fullscreen);
         self.wake_word.set_checked(prefs.wake_word);

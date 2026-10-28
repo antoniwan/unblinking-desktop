@@ -57,6 +57,8 @@ pub struct Snapshot {
     pub clock: (u32, u32),
     /// Where the webcam is set to be, in words.
     pub camera: String,
+    /// The mixer, for the Sound controls.
+    pub sound: crate::sound::Sound,
 }
 
 pub struct SensesPanel {
@@ -87,7 +89,13 @@ impl SensesPanel {
         self.win.on_event(device, event);
     }
 
-    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, snap: &Snapshot) {
+    /// Draws one frame. Returns the mixer if its controls were changed.
+    pub fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        snap: &Snapshot,
+    ) -> Option<crate::sound::Sound> {
         // A new picture replaces the texture's pixels; the same Arc means no change.
         if let Some(pic) = &snap.picture {
             let fresh = self
@@ -118,8 +126,10 @@ impl SensesPanel {
             self.picture = None;
         }
         let picture = self.picture.as_ref().map(|(_, t)| t.id());
+        let mut changed = None;
         self.win
-            .draw(device, queue, |ui| scrying(ui, snap, picture));
+            .draw(device, queue, |ui| changed = scrying(ui, snap, picture));
+        changed
     }
 }
 
@@ -161,7 +171,11 @@ pub(crate) fn with_alpha(c: Color32, a: f32) -> Color32 {
 
 /// The whole window: a dark field with a slowly turning arcane circle, a
 /// title, and four lenses.
-fn scrying(ui: &mut egui::Ui, snap: &Snapshot, picture: Option<egui::TextureId>) {
+fn scrying(
+    ui: &mut egui::Ui,
+    snap: &Snapshot,
+    picture: Option<egui::TextureId>,
+) -> Option<crate::sound::Sound> {
     let ink = Ink::of(&snap.colors);
     let full = ui.max_rect();
     let painter = ui.painter().clone();
@@ -213,9 +227,21 @@ fn scrying(ui: &mut egui::Ui, snap: &Snapshot, picture: Option<egui::TextureId>)
 
     let inner = |r: Rect, title: &str| lens(&painter, r, title, &ink);
     sight_lens(&painter, inner(sight, "Sight"), snap, picture, &ink);
-    hearing_lens(&painter, inner(hearing, "Hearing"), snap, &ink);
+    let hearing = inner(hearing, "Hearing");
+    let controls = Rect::from_min_max(
+        Pos2::new(hearing.max.x - SOUND_WIDTH, hearing.min.y),
+        hearing.max,
+    );
+    hearing_lens(
+        &painter,
+        Rect::from_min_max(hearing.min, Pos2::new(controls.min.x - 14.0, hearing.max.y)),
+        snap,
+        &ink,
+    );
+    let sound = sound_controls(ui, controls, snap.sound, &ink);
     mind_lens(&painter, inner(mind, "Mind"), snap, &ink);
     world_lens(&painter, inner(world, "World"), snap, &ink);
+    sound
 }
 
 /// Faint concentric rings and rune ticks behind everything, turning slowly.
@@ -434,7 +460,7 @@ fn hearing_lens(p: &egui::Painter, r: Rect, snap: &Snapshot, ink: &Ink) {
         );
         return;
     };
-    let plot = Rect::from_min_max(r.min, r.max - EVec2::new(96.0, 0.0));
+    let plot = r;
     let y = |v: f32| plot.max.y - v.clamp(0.0, 1.0) * plot.height();
     // Bang threshold and baseline.
     let bang = y(BANG_LEVEL as f32);
@@ -485,28 +511,13 @@ fn hearing_lens(p: &egui::Painter, r: Rect, snap: &Snapshot, ink: &Ink) {
             Color32::from_rgb(255, 90, 60),
         );
     }
-    // The big number.
-    let side = Rect::from_min_max(Pos2::new(plot.max.x + 12.0, r.min.y), r.max);
+    // The numbers, over the trail's top right.
     p.text(
-        side.center_top() + EVec2::new(0.0, 4.0),
-        Align2::CENTER_TOP,
-        format!("{:.2}", level),
-        FontId::monospace(28.0),
+        plot.right_top(),
+        Align2::RIGHT_TOP,
+        format!("loudness {level:.2} · used to {:.2}", snap.insight.baseline),
+        FontId::proportional(11.0),
         ink.core,
-    );
-    p.text(
-        side.center_top() + EVec2::new(0.0, 40.0),
-        Align2::CENTER_TOP,
-        "loudness",
-        FontId::proportional(11.0),
-        ink.faint,
-    );
-    p.text(
-        side.center_top() + EVec2::new(0.0, 60.0),
-        Align2::CENTER_TOP,
-        format!("used to {:.2}", snap.insight.baseline),
-        FontId::proportional(11.0),
-        ink.faint,
     );
 }
 
@@ -742,4 +753,41 @@ pub(crate) fn centered_note(p: &egui::Painter, r: Rect, text: &str, ink: &Ink) {
         FontId::proportional(15.0),
         ink.faint,
     );
+}
+
+/// How wide the Sound controls are, at the right of the Hearing lens.
+const SOUND_WIDTH: f32 = 190.0;
+
+/// Sound on/off, then Music, Voice and Effects, each with a switch and a
+/// volume. Returns the new mixer if anything changed.
+fn sound_controls(
+    ui: &mut egui::Ui,
+    r: Rect,
+    mut sound: crate::sound::Sound,
+    ink: &Ink,
+) -> Option<crate::sound::Sound> {
+    let before = sound;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+        let v = ui.visuals_mut();
+        v.selection.bg_fill = ink.flame;
+        v.widgets.inactive.bg_fill = with_alpha(ink.text, 0.08);
+        v.widgets.hovered.bg_fill = with_alpha(ink.glow, 0.3);
+        v.override_text_color = Some(ink.text);
+        ui.spacing_mut().slider_width = r.width() - 8.0;
+        ui.checkbox(
+            &mut sound.master,
+            egui::RichText::new("Sound").color(ink.core),
+        );
+        ui.add_space(2.0);
+        let row = |ui: &mut egui::Ui, on: &mut bool, volume: &mut f32, label: &str| {
+            ui.add_enabled_ui(sound.master, |ui| {
+                ui.checkbox(on, label);
+                ui.add_enabled(*on, egui::Slider::new(volume, 0.0..=1.0).show_value(false));
+            });
+        };
+        row(ui, &mut sound.music, &mut sound.music_volume, "Music");
+        row(ui, &mut sound.voice, &mut sound.voice_volume, "Voice");
+        row(ui, &mut sound.fx, &mut sound.fx_volume, "Effects");
+    });
+    (sound != before).then_some(sound)
 }

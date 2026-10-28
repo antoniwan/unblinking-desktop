@@ -37,6 +37,11 @@ Done so far:
   written under the eye in Tiny5, letter by letter, with an entrance from the
   mood's school of magic: Pyromancy, Arcane, Umbral, Storm, Fae, Druidic,
   Astral or Warding.
+- Sound in three channels, each with its own switch and volume, under one
+  master switch: Music (the drone), Voice (spoken whispers), and Effects (a
+  deep whoomp when it flinches, a soft chime as a whisper appears). Find them
+  in the tray's Sound menu and in Blinki's Senses. The old single Voice
+  setting carries over.
 - Blinki's Senses, a window that shows what the eye perceives. Open it from
   the tray or with Ctrl+Alt+B.
 - "Where's my camera?" (in the tray): your monitors as they're laid out.
