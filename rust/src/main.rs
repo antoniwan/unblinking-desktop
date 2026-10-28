@@ -514,6 +514,17 @@ fn on_some_screen(event_loop: &ActiveEventLoop, p: Position) -> bool {
 }
 
 /// The whole app. winit calls into it through `ApplicationHandler`.
+/// Hours after midnight before this count as the small hours.
+const LATE_UNTIL_HOUR: u32 = 5;
+/// What it says when you're up too late, and how often at most.
+const WORRY_LINES: [&str; 4] = [
+    "It's late. Rest your eyes.",
+    "Sleep. I will keep watch.",
+    "Even I close my eye sometimes.",
+    "The night is long. Go to bed.",
+];
+const WORRY_EVERY: Duration = Duration::from_secs(30 * 60);
+
 struct App {
     args: Args,
     gpu: Option<Gpu>,
@@ -575,6 +586,12 @@ struct App {
     demo: Option<demo::Demo>,
     /// --record's frames, written out when the app ends.
     recording: Option<record::Recording>,
+    /// Seconds you've been up and here past midnight tonight, and when you
+    /// were last here (face or keyboard/mouse), for the Worried mood.
+    up_late: f32,
+    last_here: Instant,
+    /// When it last told you to rest, so it doesn't nag.
+    last_worry: Option<Instant>,
     /// Proof this is the only copy running; another launch pokes it awake.
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
@@ -753,6 +770,19 @@ impl App {
                 }
             }
         }
+        // Up late: time here (face, or input in the last 30 s) after
+        // midnight. Five minutes away, or morning, starts it over.
+        let here = !faces.is_empty() || desktop::idle_secs().is_some_and(|i| i < 30.0);
+        if here {
+            self.last_here = now;
+        }
+        let small_hours = desktop::local_hour() < LATE_UNTIL_HOUR;
+        if !small_hours || self.last_here.elapsed() > Duration::from_secs(300) {
+            self.up_late = 0.0;
+        } else if here {
+            self.up_late += dt as f32;
+        }
+
         let now_unix = remembrance::unix_now();
         let temperament = self.book.as_ref().map(|b| b.temperament(now_unix));
 
@@ -774,8 +804,21 @@ impl App {
                 crowd: mind::crowd_size(&faces),
                 temperament,
                 expression,
+                up_late_secs: self.up_late,
             },
         );
+        // Worried: tell you to rest, gently, at most twice an hour.
+        if choice.mood == "Worried"
+            && self.last_worry.is_none_or(|t| t.elapsed() > WORRY_EVERY)
+        {
+            self.last_worry = Some(now);
+            let line = WORRY_LINES[fastrand::usize(..WORRY_LINES.len())];
+            eprintln!("worried: {line}");
+            if self.prefs.whispers {
+                self.voice.say(line);
+                self.pending_whisper = Some(line.to_string());
+            }
+        }
         // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
         let (mood, reason) = match (self.args.mood.as_deref(), &self.demo) {
             (Some(m), _) => (m, "held by --mood"),
@@ -1562,6 +1605,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         last_flinch_sound: f64::NEG_INFINITY,
         demo: None,
         recording: None,
+        up_late: 0.0,
+        last_here: now,
+        last_worry: None,
         _hotkeys: hotkeys,
         instance,
     };
