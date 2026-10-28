@@ -93,17 +93,41 @@ pub fn pixels_per_metre() -> f64 {
 }
 
 /// The hour of the day on the local clock, 0..23.
-#[cfg(windows)]
 pub fn local_hour() -> u32 {
+    local_time().0
+}
+
+/// Hours and minutes on the local clock.
+#[cfg(windows)]
+pub fn local_time() -> (u32, u32) {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     // Some Win32 calls simply return a struct and can't fail.
     let now = unsafe { GetLocalTime() };
-    now.wHour as u32
+    (now.wHour as u32, now.wMinute as u32)
 }
 
 #[cfg(not(windows))]
-pub fn local_hour() -> u32 {
-    12
+pub fn local_time() -> (u32, u32) {
+    (12, 0)
+}
+
+/// Seconds since the last keyboard or mouse input anywhere on the desktop.
+#[cfg(windows)]
+pub fn idle_secs() -> Option<f64> {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    unsafe { GetLastInputInfo(&mut info) }.ok().ok()?;
+    let now = unsafe { GetTickCount() };
+    Some(now.wrapping_sub(info.dwTime) as f64 / 1000.0)
+}
+
+#[cfg(not(windows))]
+pub fn idle_secs() -> Option<f64> {
+    None
 }
 
 #[cfg(not(windows))]

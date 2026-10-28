@@ -168,6 +168,29 @@ pub type Say = Box<dyn FnMut(&'static str, Line)>;
 /// the biggest one (about the same distance from the camera).
 const CROWD_SIZE: f64 = 0.8;
 
+/// A bang: louder than this, and this much louder than a moment ago.
+pub const BANG_LEVEL: f64 = 0.62;
+pub const BANG_JUMP: f64 = 0.3;
+
+/// A read-only look inside the mind, for Blinki's Senses.
+#[derive(Clone, Debug)]
+pub struct Insight {
+    /// Seconds since the mind woke.
+    pub t: f64,
+    /// Where the gaze is heading, before smoothing and tremor.
+    pub target: Vec2,
+    /// The loudness it has got used to; a bang is a jump above this.
+    pub baseline: f64,
+    /// When it last flinched, in mind seconds.
+    pub last_startle: f64,
+    /// The face it's following, smoothed.
+    pub tracked: Option<Face>,
+    /// Each line kind's earliest next whisper, in mind seconds.
+    pub cooldowns: Vec<(Line, f64)>,
+    /// No whisper at all before this (the six second hush).
+    pub hush_until: f64,
+}
+
 /// How many people are in view: confident faces near the biggest one's size.
 pub fn crowd_size(faces: &[Face]) -> usize {
     let sure = || faces.iter().filter(|f| f.score > 0.55);
@@ -225,6 +248,21 @@ pub struct Mind {
 }
 
 impl Mind {
+    pub fn insight(&self) -> Insight {
+        let mut cooldowns: Vec<(Line, f64)> =
+            self.line_cooldowns.iter().map(|(&k, &v)| (k, v)).collect();
+        cooldowns.sort_by(|a, b| a.1.total_cmp(&b.1));
+        Insight {
+            t: self.t,
+            target: self.target,
+            baseline: self.baseline,
+            last_startle: self.last_startle,
+            tracked: self.face,
+            cooldowns,
+            hush_until: self.last_whisper + 6.0,
+        }
+    }
+
     pub fn new(say: Say) -> Self {
         Self::with_rng(say, fastrand::Rng::new())
     }
@@ -511,7 +549,7 @@ impl Mind {
             let jump = level - self.baseline;
             self.baseline = approach(self.baseline, level, 1.5, dt);
             heat_target += level * 0.45;
-            if level > 0.62 && jump > 0.3 && t - self.last_startle > 1.5 {
+            if level > BANG_LEVEL && jump > BANG_JUMP && t - self.last_startle > 1.5 {
                 self.last_startle = t;
                 self.flare = 1.0;
                 self.shake = 1.0;

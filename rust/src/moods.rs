@@ -155,6 +155,11 @@ impl Moods {
         Look::mix(&self.from, &self.to, eased)
     }
 
+    /// How far the blend into the current mood has got, 0..1.
+    pub fn blend(&self) -> f32 {
+        (self.since.elapsed().as_secs_f32() / BLEND_SECS).min(1.0)
+    }
+
     pub fn current(&self) -> &Mood {
         &self.moods[self.current]
     }

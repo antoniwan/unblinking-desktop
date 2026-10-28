@@ -14,18 +14,26 @@ use nokhwa::utils::{
     CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
 };
 
-use super::Detector;
-use crate::mind::Face;
+use image::RgbImage;
+use image::imageops::{self, FilterType};
+
+use super::{Detection, Detector};
 
 /// Face detection is the costly part; 15 times a second is plenty.
 const LOOK_EVERY: Duration = Duration::from_millis(66);
 
+/// How wide the live picture for Blinki's Senses is.
+const PREVIEW_WIDTH: u32 = 480;
+
 /// One report from the camera thread.
 #[derive(Clone, Debug, Default)]
 pub struct Sight {
-    pub faces: Vec<Face>,
+    pub detections: Vec<Detection>,
     /// True while a camera is open and its frames are being looked at.
     pub can_see: bool,
+    /// A small copy of the frame, only while Blinki's Senses is open. It is
+    /// shown live and dropped; nothing is ever written to disk.
+    pub preview: Option<Arc<RgbImage>>,
 }
 
 /// The open eyes: a handle on the camera thread.
@@ -35,6 +43,8 @@ pub struct Eyes {
     // read and written from several threads at once without a lock;
     // the Arc lets both threads own it.
     stop: Arc<AtomicBool>,
+    /// Set while Blinki's Senses is open and wants the picture.
+    preview: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     reports: Receiver<Sight>,
     latest: Sight,
@@ -58,15 +68,17 @@ impl Eyes {
         // A channel is a one-way queue between threads: the camera thread
         // keeps the Sender, we keep the Receiver.
         let (tx, reports) = mpsc::channel();
-        let flag = Arc::clone(&stop);
+        let preview = Arc::new(AtomicBool::new(false));
+        let (flag, want) = (Arc::clone(&stop), Arc::clone(&preview));
         // `move` hands the closure ownership of what it uses (the detector,
-        // the flag, the sender), so they travel to the new thread with it.
+        // the flags, the sender), so they travel to the new thread with it.
         let thread = thread::Builder::new()
             .name("camera".into())
-            .spawn(move || watch(make, flag, tx))
+            .spawn(move || watch(make, flag, want, tx))
             .expect("spawn camera thread");
         Eyes {
             stop,
+            preview,
             thread: Some(thread),
             reports,
             latest: Sight::default(),
@@ -80,6 +92,14 @@ impl Eyes {
             self.latest = sight;
         }
         &self.latest
+    }
+
+    /// Asks the camera thread to include (or stop including) a small picture.
+    pub fn set_preview(&mut self, on: bool) {
+        self.preview.store(on, Ordering::Relaxed);
+        if !on {
+            self.latest.preview = None;
+        }
     }
 }
 
@@ -108,7 +128,7 @@ pub(super) fn open_camera() -> Result<Camera, nokhwa::NokhwaError> {
 }
 
 /// The camera thread's whole life.
-fn watch<F>(make: F, stop: Arc<AtomicBool>, tx: Sender<Sight>)
+fn watch<F>(make: F, stop: Arc<AtomicBool>, preview: Arc<AtomicBool>, tx: Sender<Sight>)
 where
     F: FnOnce() -> Result<Box<dyn Detector>, String>,
 {
@@ -138,8 +158,8 @@ where
         f.frame_rate()
     );
     let _ = tx.send(Sight {
-        faces: vec![],
         can_see: true,
+        ..Sight::default()
     });
 
     let mut last_look: Option<Instant> = None;
@@ -164,12 +184,22 @@ where
                 continue;
             }
         };
-        let faces = detector.detect(&rgb);
+        let detections = detector.detect(&rgb);
+        let preview = preview.load(Ordering::Relaxed).then(|| {
+            let h = rgb.height() * PREVIEW_WIDTH / rgb.width().max(1);
+            Arc::new(imageops::resize(
+                &rgb,
+                PREVIEW_WIDTH,
+                h,
+                FilterType::Triangle,
+            ))
+        });
         // A send fails only when the Eyes are gone; then there's no one to tell.
         if tx
             .send(Sight {
-                faces,
+                detections,
                 can_see: true,
+                preview,
             })
             .is_err()
         {
@@ -189,7 +219,7 @@ mod tests {
     struct Counter(Arc<Mutex<Vec<(u32, u32)>>>);
 
     impl Detector for Counter {
-        fn detect(&mut self, frame: &image::RgbImage) -> Vec<Face> {
+        fn detect(&mut self, frame: &image::RgbImage) -> Vec<Detection> {
             self.0.lock().unwrap().push(frame.dimensions());
             vec![]
         }

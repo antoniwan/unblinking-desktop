@@ -4,6 +4,7 @@
 //! Flags:
 //!   --snap=MS        after MS milliseconds, save the frame to snap.png and quit
 //!   --backend=NAME   force `dx12` or `vulkan` instead of trying both
+//!   --senses         open Blinki's Senses at start (also Ctrl+Alt+B, or the tray)
 //!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
 //!   --blind          start blinded this run (camera and mic off), without saving it
 //!
@@ -21,6 +22,7 @@ mod mind;
 mod moods;
 mod prefs;
 mod senses;
+mod senses_panel;
 mod tray;
 
 use std::error::Error;
@@ -35,7 +37,8 @@ use winit::window::{Window, WindowId, WindowLevel};
 
 use desktop::{Point, Rect};
 use eye::{Eye, EyeState};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use mind::{Line, Mind, Mode, Senses, Vec2, World};
@@ -46,6 +49,10 @@ use senses::camera::Eyes;
 use senses::face::YuNet;
 use senses::mic::Ears;
 use tray::{Action, Tray};
+
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use senses_panel::{LEVEL_HISTORY, SensesPanel, Snapshot};
 
 /// Window size in logical pixels (scaled by the monitor's DPI), as in main.js.
 const WIN_SIZE: f64 = 320.0;
@@ -74,6 +81,7 @@ struct Args {
     backend: Option<Backend>,
     blind: bool,
     mood: Option<String>,
+    senses: bool,
 }
 
 impl Args {
@@ -83,6 +91,7 @@ impl Args {
             backend: None,
             blind: false,
             mood: None,
+            senses: false,
         };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
@@ -101,6 +110,8 @@ impl Args {
                 };
             } else if let Some(name) = arg.strip_prefix("--mood=") {
                 args.mood = Some(name.to_string());
+            } else if arg == "--senses" {
+                args.senses = true;
             } else if arg == "--blind" {
                 args.blind = true;
             } else {
@@ -163,6 +174,9 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     eye: Eye,
+    // Kept so another window (Blinki's Senses) can draw with the same GPU.
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
 }
 
 impl Gpu {
@@ -248,6 +262,8 @@ impl Gpu {
             info.name, info.backend, caps.alpha_modes, size.width, size.height
         );
         Ok(Gpu {
+            instance,
+            adapter,
             window,
             surface,
             device,
@@ -404,6 +420,17 @@ struct App {
     last_noise: Instant,
     /// The screen's pixels per metre, to place the eye in the room.
     px_per_m: f64,
+    /// Blinki's Senses, while it's open, and what it shows.
+    panel: Option<SensesPanel>,
+    snapshot: Option<Snapshot>,
+    levels: VecDeque<f32>,
+    /// One flag per entry in `levels`: did it flinch on that frame?
+    flinch_marks: VecDeque<bool>,
+    last_startle: f64,
+    /// Every whisper so far, for the Mind lens.
+    whisper_log: Rc<RefCell<Vec<(Instant, Line, &'static str)>>>,
+    /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
+    _hotkeys: Option<GlobalHotKeyManager>,
 }
 
 impl App {
@@ -445,7 +472,8 @@ impl App {
         let (faces, can_see) = match &mut self.eyes {
             Some(eyes) => {
                 let sight = eyes.look();
-                (sight.faces.clone(), sight.can_see)
+                let faces: Vec<_> = sight.detections.iter().map(|d| d.face).collect();
+                (faces, sight.can_see)
             }
             None => (vec![], false),
         };
@@ -509,7 +537,9 @@ impl App {
             .args
             .mood
             .as_deref()
+            .map(|m| (m, "held by --mood"))
             .unwrap_or_else(|| self.choose_mood(&s, &faces));
+        let (mood, reason) = mood;
         self.moods.set(mood);
         let look = self.moods.now();
         self.flow = (self.flow + dt as f32 * look.flow) % 1.0;
@@ -534,7 +564,7 @@ impl App {
             s.shake.x as f32 + (fastrand::f32() - 0.5) * jitter,
             s.shake.y as f32 + (fastrand::f32() - 0.5) * jitter,
         ];
-        EyeState {
+        let state = EyeState {
             flow: self.flow,
             gaze: [s.gaze.x as f32, s.gaze.y as f32],
             pupil,
@@ -549,11 +579,116 @@ impl App {
             swirl: look.swirl,
             glow: look.glow,
             embers: look.embers,
+        };
+        if self.panel.is_some() {
+            self.observe(&s, &state, reason, level, window);
+        }
+        state
+    }
+
+    /// Gathers what Blinki's Senses shows this frame.
+    fn observe(
+        &mut self,
+        s: &mind::Frame,
+        state: &EyeState,
+        reason: &'static str,
+        level: f64,
+        window: &Window,
+    ) {
+        let insight = self.mind.insight();
+        // A new startle time means it flinched this frame.
+        let flinched = insight.last_startle > self.last_startle;
+        self.last_startle = insight.last_startle;
+        self.levels.push_back(level as f32);
+        self.flinch_marks.push_back(flinched);
+        while self.levels.len() > LEVEL_HISTORY {
+            self.levels.pop_front();
+            self.flinch_marks.pop_front();
+        }
+        let (detections, can_see, picture) = match &mut self.eyes {
+            Some(eyes) => {
+                let sight = eyes.look();
+                (
+                    sight.detections.clone(),
+                    sight.can_see,
+                    sight.preview.clone(),
+                )
+            }
+            None => (vec![], false, None),
+        };
+        // Where "sitting normally" lands in the picture, at the tracked face's distance.
+        let rest_in_picture = insight.tracked.map(|f| {
+            let off = self.prefs.look_offset.map_or((0.0, 0.0), |p| (p.x, p.y));
+            let [_, _, dist] = mind::face_in_room(&f);
+            let tan_h = (70.0f64.to_radians() / 2.0).tan();
+            let tan_v = tan_h / f.aspect;
+            let x = 0.5 - (mind::REST_SEAT.x + off.0) / (2.0 * tan_h * dist);
+            let y = 0.5 + (mind::REST_SEAT.y + off.1) / (2.0 * tan_v * dist);
+            [x as f32, y as f32]
+        });
+        let world = self.world(window);
+        let whispers = self
+            .whisper_log
+            .borrow()
+            .iter()
+            .map(|(at, kind, text)| (insight.t - at.elapsed().as_secs_f64(), *kind, *text))
+            .collect();
+        self.snapshot = Some(Snapshot {
+            frame: *s,
+            drawn_gaze: state.gaze,
+            mood: self.moods.current().name.clone(),
+            mood_reason: reason,
+            mood_blend: self.moods.blend(),
+            colors: state.colors,
+            detections,
+            can_see,
+            blind: self.prefs.blind,
+            picture,
+            rest_in_picture,
+            levels: self.levels.clone(),
+            flinches: self
+                .flinch_marks
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| **f)
+                .map(|(i, _)| i)
+                .collect(),
+            heard: self.ears.as_ref().map(Ears::level),
+            whispers,
+            cursor: world.map(|w| w.cursor),
+            eye: world.map(|w| w.eye),
+            display: world.map(|w| w.display),
+            idle: desktop::idle_secs(),
+            clock: desktop::local_time(),
+            insight,
+        });
+    }
+
+    /// Opens Blinki's Senses, or closes it (which also stops the camera preview).
+    fn toggle_senses(&mut self, event_loop: &ActiveEventLoop) {
+        if self.panel.take().is_some() {
+            self.snapshot = None;
+            if let Some(eyes) = &mut self.eyes {
+                eyes.set_preview(false);
+            }
+            return;
+        }
+        let Some(gpu) = &self.gpu else { return };
+        match SensesPanel::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
+            Ok(panel) => {
+                panel.window.request_redraw();
+                self.panel = Some(panel);
+                if let Some(eyes) = &mut self.eyes {
+                    eyes.set_preview(true);
+                }
+            }
+            Err(err) => eprintln!("could not open Blinki's Senses: {err}"),
         }
     }
 
     /// Picks the mood from the studio's triggers, most urgent first.
-    fn choose_mood(&self, s: &mind::Frame, faces: &[mind::Face]) -> &'static str {
+    /// Returns the mood's name and the reason, for Blinki's Senses.
+    fn choose_mood(&self, s: &mind::Frame, faces: &[mind::Face]) -> (&'static str, &'static str) {
         let said_lately = |kinds: &[Line], secs: f32| {
             self.last_said.get().is_some_and(|(kind, at)| {
                 kinds.contains(&kind) && at.elapsed().as_secs_f32() < secs
@@ -568,21 +703,23 @@ impl App {
         let too_close = faces.iter().any(|f| f.score > 0.55 && f.size > 0.5);
 
         if s.mode == Mode::Blind {
-            "Blinded"
-        } else if said_lately(&[Line::Loud], 3.0) || too_close {
-            "Wrathful"
+            ("Blinded", "you blinded it")
+        } else if said_lately(&[Line::Loud], 3.0) {
+            ("Wrathful", "a bang, just now")
+        } else if too_close {
+            ("Wrathful", "a face far too close")
         } else if said_lately(&[Line::Returned, Line::First], 4.0) {
-            "Delighted"
+            ("Delighted", "you came into view")
         } else if mind::crowd_size(faces) > 1 {
-            "Suspicious"
+            ("Suspicious", "two or more people")
         } else if late && quiet {
-            "Drowsy"
+            ("Drowsy", "late, and quiet for two minutes")
         } else if s.mode == Mode::Locked {
-            "Watchful"
+            ("Watchful", "a face in view")
         } else if no_face_for > Duration::from_secs(60) {
-            "Lonely"
+            ("Lonely", "no face for over a minute")
         } else {
-            "Curious"
+            ("Curious", "looking around")
         }
     }
 
@@ -618,6 +755,7 @@ impl App {
         // A match arm can have a guard (`if ...`); arms are tried in order.
         match action {
             Action::Quit => self.close(AfterClose::Quit, event_loop),
+            Action::Senses => self.toggle_senses(event_loop),
             Action::ToggleShown if self.presence.shown() => {
                 self.close(AfterClose::Hide, event_loop)
             }
@@ -634,7 +772,7 @@ impl App {
                 let face = self
                     .eyes
                     .as_mut()
-                    .and_then(|e| e.look().faces.first().copied());
+                    .and_then(|e| e.look().detections.first().map(|d| d.face));
                 match face {
                     Some(face) => {
                         let [x, y, _] = mind::face_in_room(&face);
@@ -653,7 +791,7 @@ impl App {
                 let _ = window.set_cursor_hittest(!on);
             }
         }
-        if action != Action::ToggleShown && action != Action::Quit {
+        if !matches!(action, Action::ToggleShown | Action::Quit | Action::Senses) {
             self.prefs.save();
         }
         if let Some(tray) = &self.tray {
@@ -749,6 +887,9 @@ impl ApplicationHandler for App {
                             .map_err(|err| eprintln!("no tray icon: {err}"))
                             .ok();
                         self.set_senses(!self.prefs.blind);
+                        if self.args.senses {
+                            self.toggle_senses(event_loop);
+                        }
                         return;
                     }
                     Err(err) => eprintln!("unblinking: {backend:?} failed: {err}"),
@@ -759,7 +900,19 @@ impl ApplicationHandler for App {
         event_loop.exit();
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Events for Blinki's Senses go to the panel.
+        if let (Some(panel), Some(gpu)) = (&mut self.panel, &self.gpu)
+            && panel.id() == id
+        {
+            match event {
+                WindowEvent::CloseRequested => self.toggle_senses(event_loop),
+                // It's drawn right after each frame of the eye instead.
+                WindowEvent::RedrawRequested => {}
+                other => panel.on_event(&gpu.device, &other),
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => self.close(AfterClose::Quit, event_loop),
             // Drag the eye anywhere with the left button.
@@ -793,6 +946,10 @@ impl ApplicationHandler for App {
                 };
                 let state = self.step(&gpu.window);
                 gpu.render(&state);
+                // Blinki's Senses follows along, one picture per eye frame.
+                if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot) {
+                    panel.draw(&gpu.device, &gpu.queue, snap);
+                }
                 if snap_due {
                     if let Err(err) = self.snap(&gpu, &state) {
                         eprintln!("snapshot failed: {err}");
@@ -813,6 +970,11 @@ impl ApplicationHandler for App {
         let actions = self.tray.as_ref().map_or_else(Vec::new, Tray::poll);
         for action in actions {
             self.act(action, event_loop);
+        }
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.state == HotKeyState::Pressed {
+                self.toggle_senses(event_loop);
+            }
         }
         if self.save_move_at.is_some_and(|t| Instant::now() >= t) {
             self.save_move_at = None;
@@ -872,9 +1034,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     // latest one, because some moods follow what was just said.
     let last_said = Rc::new(Cell::new(None));
     let heard = Rc::clone(&last_said);
+    let whisper_log = Rc::new(RefCell::new(Vec::new()));
+    let log = Rc::clone(&whisper_log);
     let say: mind::Say = Box::new(move |text, kind| {
         eprintln!("whisper ({kind:?}): {text}");
         heard.set(Some((kind, Instant::now())));
+        log.borrow_mut().push((Instant::now(), kind, text));
+    });
+    // Ctrl+Alt+B opens Blinki's Senses from anywhere. If another app has
+    // the shortcut, the tray item still works.
+    let hotkeys = GlobalHotKeyManager::new().ok().filter(|m| {
+        let key = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyB);
+        m.register(key)
+            .map_err(|err| eprintln!("no Ctrl+Alt+B: {err}"))
+            .is_ok()
     });
     let now = Instant::now();
     let args = Args::parse();
@@ -906,6 +1079,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("screen: {ppm:.0} pixels per metre");
             ppm
         },
+        panel: None,
+        snapshot: None,
+        levels: VecDeque::new(),
+        flinch_marks: VecDeque::new(),
+        last_startle: f64::NEG_INFINITY,
+        whisper_log,
+        _hotkeys: hotkeys,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

@@ -20,6 +20,8 @@ pub enum Action {
     ClickThrough(bool),
     /// Take where you sit now as dead centre.
     LookAtMe,
+    /// Open or close Blinki's Senses.
+    Senses,
     Quit,
 }
 
@@ -34,6 +36,7 @@ pub struct Tray {
     voice: CheckMenuItem,
     click_through: CheckMenuItem,
     look_at_me: MenuItem,
+    senses: MenuItem,
     quit: MenuItem,
 }
 
@@ -47,6 +50,7 @@ impl Tray {
         let click_through =
             CheckMenuItem::new("Let clicks pass through", true, prefs.click_through, None);
         let look_at_me = MenuItem::new("Look at me (sit as usual, then click)", true, None);
+        let senses = MenuItem::new("Blinki's Senses  (Ctrl+Alt+B)", true, None);
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
@@ -58,6 +62,7 @@ impl Tray {
         menu.append(&voice)?;
         menu.append(&click_through)?;
         menu.append(&look_at_me)?;
+        menu.append(&senses)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&quit)?;
 
@@ -80,6 +85,7 @@ impl Tray {
             voice,
             click_through,
             look_at_me,
+            senses,
             quit,
         };
         tray.refresh(prefs, true);
@@ -103,6 +109,8 @@ impl Tray {
                 Action::Voice(self.voice.is_checked())
             } else if id == self.click_through.id() {
                 Action::ClickThrough(self.click_through.is_checked())
+            } else if id == self.senses.id() {
+                Action::Senses
             } else if id == self.look_at_me.id() {
                 Action::LookAtMe
             } else if id == self.quit.id() {

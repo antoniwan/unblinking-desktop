@@ -10,7 +10,7 @@ use image::RgbImage;
 use image::imageops::{self, FilterType};
 use tract_onnx::prelude::*;
 
-use super::Detector;
+use super::{Detection, Detector};
 use crate::mind::Face;
 
 /// The model, built into the exe so there is nothing to download at setup.
@@ -35,8 +35,8 @@ struct Bbox {
     w: f32,
     h: f32,
     score: f32,
-    /// Midway between the two eyes (YuNet's first two landmarks).
-    eyes: (f32, f32),
+    /// Right eye, left eye, nose tip, right and left mouth corners.
+    kps: [[f32; 2]; 5],
 }
 
 pub struct YuNet {
@@ -58,7 +58,7 @@ impl YuNet {
         Ok(YuNet { plan })
     }
 
-    fn run(&self, frame: &RgbImage) -> TractResult<Vec<Face>> {
+    fn run(&self, frame: &RgbImage) -> TractResult<Vec<Detection>> {
         let (fw, fh) = frame.dimensions();
         // Shrink to fit IN_W x IN_H without stretching; the rest stays black.
         let k = (IN_W as f32 / fw as f32).min(IN_H as f32 / fh as f32);
@@ -87,15 +87,23 @@ impl YuNet {
             let kps = out[9 + i].try_as_plain_ram()?.as_slice::<f32>()?;
             boxes.extend(decode(stride, cls, obj, bbox, kps));
         }
+        let (sw, sh) = (sw as f32, sh as f32);
         let faces = nms(boxes)
             .into_iter()
-            // The eye looks at your eyes, not the middle of the box (your nose).
-            .map(|b| Face {
-                x: (b.eyes.0 / sw as f32) as f64,
-                y: (b.eyes.1 / sh as f32) as f64,
-                size: (b.w / sw as f32) as f64,
-                score: b.score as f64,
-                aspect: fw as f64 / fh as f64,
+            .map(|b| {
+                let kps = b.kps.map(|[x, y]| [x / sw, y / sh]);
+                Detection {
+                    // The eye looks at your eyes, not the middle of the box (your nose).
+                    face: Face {
+                        x: ((kps[0][0] + kps[1][0]) / 2.0) as f64,
+                        y: ((kps[0][1] + kps[1][1]) / 2.0) as f64,
+                        size: (b.w / sw) as f64,
+                        score: b.score as f64,
+                        aspect: fw as f64 / fh as f64,
+                    },
+                    bbox: [b.x / sw, b.y / sh, b.w / sw, b.h / sh],
+                    landmarks: kps,
+                }
             })
             .collect();
         Ok(faces)
@@ -103,7 +111,7 @@ impl YuNet {
 }
 
 impl Detector for YuNet {
-    fn detect(&mut self, frame: &RgbImage) -> Vec<Face> {
+    fn detect(&mut self, frame: &RgbImage) -> Vec<Detection> {
         // A failed run sees nothing this frame; the next frame tries again.
         self.run(frame).unwrap_or_else(|err| {
             eprintln!("face detector failed: {err}");
@@ -128,16 +136,16 @@ fn decode(stride: usize, cls: &[f32], obj: &[f32], bbox: &[f32], kps: &[f32]) ->
         let b = &bbox[idx * 4..idx * 4 + 4];
         let (cx, cy) = ((col + b[0]) * s, (row + b[1]) * s);
         let (w, h) = (b[2].exp() * s, b[3].exp() * s);
-        let k = &kps[idx * 10..idx * 10 + 4];
-        let eye = |dx: f32, dy: f32| ((col + dx) * s, (row + dy) * s);
-        let (right, left) = (eye(k[0], k[1]), eye(k[2], k[3]));
+        let k = &kps[idx * 10..idx * 10 + 10];
+        // `std::array::from_fn` builds the five points from their index.
+        let kps = std::array::from_fn(|j| [(col + k[2 * j]) * s, (row + k[2 * j + 1]) * s]);
         boxes.push(Bbox {
             x: cx - w / 2.0,
             y: cy - h / 2.0,
             w,
             h,
             score,
-            eyes: ((right.0 + left.0) / 2.0, (right.1 + left.1) / 2.0),
+            kps,
         });
     }
     boxes
@@ -179,7 +187,7 @@ mod tests {
             w,
             h: w,
             score,
-            eyes: (x + w / 2.0, y + w / 3.0),
+            kps: [[x + w / 2.0, y + w / 3.0]; 5],
         }
     }
 
@@ -208,6 +216,7 @@ mod tests {
         bbox[48..52].copy_from_slice(&[0.5, 0.5, 0.0, 0.0]); // centered, one cell wide
         kps[120..124].copy_from_slice(&[0.25, 0.25, 0.75, 0.25]); // eyes in the top quarter
         let boxes = decode(32, &cls, &obj, &bbox, &kps);
+        let kps = boxes[0].kps;
         assert_eq!(
             boxes,
             vec![Bbox {
@@ -216,9 +225,11 @@ mod tests {
                 w: 32.0,
                 h: 32.0,
                 score: 1.0,
-                eyes: (80.0, 40.0),
+                kps,
             }]
         );
+        assert_eq!(kps[0], [72.0, 40.0]);
+        assert_eq!(kps[1], [88.0, 40.0],);
     }
 
     #[test]
@@ -243,8 +254,12 @@ mod tests {
         camera.stop_stream().unwrap();
         let rgb = frame.unwrap().decode_image::<RgbFormat>().unwrap();
         let mut net = YuNet::new().unwrap();
-        let faces = net.detect(&rgb);
-        let mirrored = net.detect(&imageops::flip_horizontal(&rgb));
+        let faces: Vec<Face> = net.detect(&rgb).iter().map(|d| d.face).collect();
+        let mirrored: Vec<Face> = net
+            .detect(&imageops::flip_horizontal(&rgb))
+            .iter()
+            .map(|d| d.face)
+            .collect();
         eprintln!(
             "frame {:?}
 faces {faces:?}
