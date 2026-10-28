@@ -34,6 +34,7 @@ mod senses_panel;
 mod session;
 mod tray;
 mod voice;
+mod wellbeing;
 mod whisper;
 
 use std::error::Error;
