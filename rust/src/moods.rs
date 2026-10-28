@@ -207,4 +207,96 @@ mod tests {
         moods.since -= std::time::Duration::from_secs(2);
         assert_eq!(moods.now().heat, 1.2, "ends at Wrathful");
     }
+
+    #[test]
+    fn every_mood_has_real_colours_and_sane_numbers() {
+        // Guards the studio export: a typo'd colour would silently turn black.
+        let moods = Moods::load();
+        for m in &moods.moods {
+            for c in &m.colors {
+                let digits = c.trim_start_matches('#');
+                assert!(
+                    c.starts_with('#')
+                        && digits.len() == 6
+                        && u32::from_str_radix(digits, 16).is_ok(),
+                    "{}: bad colour {c:?}",
+                    m.name
+                );
+            }
+            let look = Look::of(m);
+            for v in [
+                look.dim,
+                look.embers,
+                look.flow,
+                look.glow,
+                look.heat,
+                look.shake,
+                look.swirl,
+                look.wake,
+            ] {
+                assert!(v.is_finite() && v >= 0.0, "{}: {look:?}", m.name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_malformed_colour_is_black() {
+        assert_eq!(hex("#nothex"), [0.0, 0.0, 0.0]);
+        assert_eq!(hex(""), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mixing_is_a_straight_line_between_two_looks() {
+        let moods = Moods::load();
+        let a = Look::of(&moods.moods[0]);
+        let b = Look::of(&moods.moods[1]);
+        assert_eq!(Look::mix(&a, &b, 0.0), a);
+        assert_eq!(Look::mix(&a, &b, 1.0), b);
+        let mid = Look::mix(&a, &b, 0.5);
+        assert!((mid.heat - (a.heat + b.heat) / 2.0).abs() < 1e-6);
+        for (k, c) in mid.colors.iter().enumerate() {
+            for (i, v) in c.iter().enumerate() {
+                let want = (a.colors[k][i] + b.colors[k][i]) / 2.0;
+                assert!((v - want).abs() < 1e-6, "colour {k}.{i}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_mood_changes_nothing() {
+        let mut moods = Moods::load();
+        moods.since -= std::time::Duration::from_secs(5);
+        let before = moods.now();
+        moods.set("Hangry");
+        assert_eq!(moods.current().name, "Watchful");
+        assert_eq!(moods.blend(), 1.0, "no new blend started");
+        assert_eq!(moods.now(), before);
+    }
+
+    #[test]
+    fn asking_for_the_current_mood_does_not_restart_the_blend() {
+        let mut moods = Moods::load();
+        moods.set("Drowsy");
+        moods.since -= std::time::Duration::from_secs(5);
+        moods.set("Drowsy");
+        assert_eq!(moods.blend(), 1.0);
+    }
+
+    #[test]
+    fn a_blend_eases_in_and_out() {
+        // Halfway through the time, smoothstep is exactly halfway; a quarter
+        // of the way in, it has moved less than a quarter (it eases in).
+        let mut moods = Moods::load();
+        let from = moods.now();
+        moods.set("Wrathful");
+        let to = Look::of(moods.current());
+        let at = |moods: &mut Moods, secs: f32| {
+            moods.since = Instant::now() - std::time::Duration::from_secs_f32(secs);
+            (moods.now().heat - from.heat) / (to.heat - from.heat)
+        };
+        let half = at(&mut moods, BLEND_SECS / 2.0);
+        let quarter = at(&mut moods, BLEND_SECS / 4.0);
+        assert!((half - 0.5).abs() < 0.02, "half {half}");
+        assert!(quarter < 0.25, "quarter {quarter}");
+    }
 }

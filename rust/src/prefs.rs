@@ -195,4 +195,56 @@ mod tests {
         assert!(text.contains("\"hideFullscreen\":false"), "{text}");
         assert!(!Prefs::from_json(&text).hide_fullscreen);
     }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let p = Prefs::from_json(r#"{ "whispers": false, "theme": "dark", "future": [1, 2] }"#);
+        let want = Prefs {
+            whispers: false,
+            ..Prefs::default()
+        };
+        assert_eq!(p, want);
+    }
+
+    #[test]
+    fn rust_only_keys_load_and_bad_ones_drop() {
+        use crate::placement::Edge;
+        let p = Prefs::from_json(
+            r#"{ "lookOffset": { "x": 0.02, "y": -0.01 }, "position": null,
+                 "camera": { "monitor": "DISPLAY2", "edge": "left", "offset": 0.25 } }"#,
+        );
+        assert_eq!(p.look_offset, Some(Position { x: 0.02, y: -0.01 }));
+        assert_eq!(p.position, None);
+        let cam = p.camera.expect("camera spot");
+        assert_eq!((cam.monitor.as_str(), cam.edge), ("DISPLAY2", Edge::Left));
+
+        let p = Prefs::from_json(
+            r#"{ "voice": true, "camera": { "monitor": "X", "edge": "diagonal", "offset": 0.5 } }"#,
+        );
+        assert_eq!(p.camera, None, "an unknown edge drops just the camera");
+        assert!(p.voice);
+    }
+
+    #[test]
+    fn everything_round_trips() {
+        use crate::placement::{CameraSpot, Edge};
+        let p = Prefs {
+            whispers: false,
+            blind: true,
+            click_through: true,
+            voice: true,
+            position: Some(Position { x: -300.5, y: 12.0 }),
+            look_offset: Some(Position { x: 0.01, y: 0.03 }),
+            camera: Some(CameraSpot {
+                monitor: "DISPLAY1".into(),
+                edge: Edge::Bottom,
+                offset: 0.7,
+            }),
+            hide_fullscreen: false,
+        };
+        let text = serde_json::to_string_pretty(&p).unwrap();
+        assert_eq!(Prefs::from_json(&text), p);
+        let d = Prefs::default();
+        assert_eq!(Prefs::from_json(&serde_json::to_string(&d).unwrap()), d);
+    }
 }

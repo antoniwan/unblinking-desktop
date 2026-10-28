@@ -1,0 +1,56 @@
+name: Rust
+
+on:
+  push:
+    branches: [rust, 'claude/**']
+    paths: ['rust/**', '.github/workflows/rust.yml']
+  pull_request:
+    branches: [rust, 'claude/**']
+    paths: ['rust/**', '.github/workflows/rust.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Check, test and build (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unblinking-exe
+          path: rust/target/release/unblinking.exe
+          retention-days: 14
+          if-no-files-found: error

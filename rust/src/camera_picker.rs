@@ -190,13 +190,13 @@ fn picker(
     let response = ui.allocate_rect(stage, Sense::click_and_drag());
     let mut picked = Picked::Nothing;
     let mut shown = spot.cloned().or_else(|| CameraSpot::default_for(monitors));
-    if let Some(at) = response.interact_pointer_pos() {
-        if let Some(s) = placement::nearest_spot(to_desk(at), monitors) {
-            if shown.as_ref() != Some(&s) {
-                picked = Picked::Moved(Some(s.clone()));
-            }
-            shown = Some(s);
+    if let Some(at) = response.interact_pointer_pos()
+        && let Some(s) = placement::nearest_spot(to_desk(at), monitors)
+    {
+        if shown.as_ref() != Some(&s) {
+            picked = Picked::Moved(Some(s.clone()));
         }
+        shown = Some(s);
     }
     if let Some(s) = &shown
         && let Some((point, _)) = placement::locate(Some(s), monitors)
