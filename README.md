@@ -107,7 +107,7 @@ How the pieces talk: [docs/architecture.md](docs/architecture.md). Working on it
 ## Inspired by
 
 - **The Eye of Sauron**, for the very first blinki's look.
-- **Remembrance**, a system from *Milak (Lifesworn)*, antoniwan's own game. The blinki's planned feeding and temperament design (a ledger of deeds, two clocks, earned traits, and a bond that only grows) comes from it. *(planned)*
+- **Remembrance**, a system from *Lifesworn*, antoniwan's own game. The blinki's planned feeding and temperament design (a ledger of deeds, two clocks, earned traits, and a bond that only grows) comes from it. *(planned)*
 
 ## License
 
