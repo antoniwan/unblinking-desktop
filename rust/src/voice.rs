@@ -1,7 +1,8 @@
-//! The voice: a low drone under the fire, and whispers spoken aloud. The
-//! Rust side of renderer/voice.js. The drone is synthesised here, sample by
-//! sample; speech uses the system's own local voices. No audio files,
-//! nothing fetched.
+//! The voice: a low drone under the fire, sound effects, and whispers spoken
+//! aloud. The Rust side of renderer/voice.js, plus effects it never had.
+//! The drone and the effects are synthesised here, sample by sample, in one
+//! audio stream; speech uses the system's own local voices. No audio files,
+//! nothing fetched. Each of the three is its own channel (see sound.rs).
 //!
 //! The drone is quiet at rest and swells (louder, brighter) with heat and
 //! flare. The mic hears the speakers, so the drone stays low and ducks
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::mind::{Frame, Mode};
+use crate::sound::Levels;
 
 // Drone loudness at rest and at full burn. Kept well below what the mic calls talking.
 const REST_GAIN: f32 = 0.025;
@@ -21,6 +23,10 @@ const PEAK_GAIN: f32 = 0.11;
 // Filter cutoff in Hz, closed at rest, open at full burn.
 const REST_CUTOFF: f32 = 140.0;
 const PEAK_CUTOFF: f32 = 900.0;
+// The effects' loudness at full volume; also well under talking.
+const FX_GAIN: f32 = 0.09;
+// Speech volume at full Voice volume, as voice.js had.
+const SPEECH_VOLUME: f32 = 0.6;
 // The room keeps ringing a moment after the voice stops.
 const SPEECH_TAIL: Duration = Duration::from_millis(600);
 // Fade out this long before letting the speakers go, so it doesn't click.
@@ -35,10 +41,20 @@ const BRIGHT: [&str; 12] = [
     "whisper", "bells", "bubbles",
 ];
 
-/// The drone's controls, shared with the audio thread. Each is an f32
+/// The sound effects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Effect {
+    /// A deep falling whoomp when it flinches at a bang.
+    Flinch,
+    /// A soft two-note chime as a whisper appears.
+    Chime,
+}
+
+/// The stream's controls, shared with the audio thread. Each is an f32
 /// stored as bits in an AtomicU32: the main thread writes targets, the
-/// audio thread glides toward them, and nobody ever waits on a lock.
-struct Controls([AtomicU32; 5]);
+/// audio thread glides toward them, and nobody ever waits on a lock. The
+/// last two are counters: each bump starts that effect once.
+struct Controls([AtomicU32; 8]);
 
 #[derive(Clone, Copy)]
 enum Knob {
@@ -47,7 +63,21 @@ enum Knob {
     Hiss,
     Band,
     Breath,
+    FxGain,
+    Flinches,
+    Chimes,
 }
+
+/// The knobs that glide (the counters don't), and how long each takes
+/// (Web Audio's setTargetAtTime constants).
+const GLIDING: [(Knob, f32); 6] = [
+    (Knob::Gain, 0.12),
+    (Knob::Cutoff, 0.15),
+    (Knob::Hiss, 0.2),
+    (Knob::Band, 0.2),
+    (Knob::Breath, 1.5),
+    (Knob::FxGain, 0.05),
+];
 
 impl Controls {
     fn new() -> Controls {
@@ -57,6 +87,7 @@ impl Controls {
         c.set(Knob::Hiss, 0.15);
         c.set(Knob::Band, 220.0);
         c.set(Knob::Breath, 0.07);
+        c.set(Knob::FxGain, 0.0);
         c
     }
     fn set(&self, k: Knob, v: f32) {
@@ -64,6 +95,12 @@ impl Controls {
     }
     fn get(&self, k: Knob) -> f32 {
         f32::from_bits(self.0[k as usize].load(Ordering::Relaxed))
+    }
+    fn bump(&self, k: Knob) {
+        self.0[k as usize].fetch_add(1, Ordering::Relaxed);
+    }
+    fn count(&self, k: Knob) -> u32 {
+        self.0[k as usize].load(Ordering::Relaxed)
     }
 }
 
@@ -106,8 +143,8 @@ impl Biquad {
 struct Synth {
     rate: f32,
     controls: Arc<Controls>,
-    // The current (smoothed) value of each knob.
-    now: [f32; 5],
+    // The current (smoothed) value of each gliding knob, in GLIDING order.
+    now: [f32; 6],
     phases: [f32; 4],
     breath_phase: f32,
     low: Biquad,
@@ -115,6 +152,13 @@ struct Synth {
     brown: f32,
     seed: u32,
     until_retune: u32,
+    // The effects: how many of each it has started, their envelopes and phases.
+    flinches_seen: u32,
+    chimes_seen: u32,
+    flinch: f32,
+    flinch_phase: f32,
+    chime: f32,
+    chime_phases: [f32; 2],
 }
 
 /// The oscillators: a root, a slightly sour twin, a sub, a faint fifth,
@@ -133,15 +177,11 @@ enum Shape {
     Sine,
 }
 
-/// How long each knob takes to glide (Web Audio's setTargetAtTime constants).
-const GLIDE: [f32; 5] = [0.12, 0.15, 0.2, 0.2, 1.5];
-
 impl Synth {
     fn new(rate: f32, controls: Arc<Controls>) -> Synth {
-        let now = [0, 1, 2, 3, 4].map(|i| f32::from_bits(controls.0[i].load(Ordering::Relaxed)));
+        let now = GLIDING.map(|(k, _)| controls.get(k));
         Synth {
             rate,
-            controls,
             now,
             phases: [0.0; 4],
             breath_phase: 0.0,
@@ -150,40 +190,50 @@ impl Synth {
             brown: 0.0,
             seed: 0x9e37_79b9,
             until_retune: 0,
+            flinches_seen: controls.count(Knob::Flinches),
+            chimes_seen: controls.count(Knob::Chimes),
+            flinch: 0.0,
+            flinch_phase: 0.0,
+            chime: 0.0,
+            chime_phases: [0.0; 2],
+            controls,
         }
     }
 
-    /// One sample of the drone.
+    fn knob(&self, k: Knob) -> f32 {
+        self.now[k as usize]
+    }
+
+    /// One sample: the drone plus any effect that's ringing.
     fn next(&mut self) -> f32 {
-        // Retune the filters every 64 samples; that's plenty for slow glides.
+        // Every 64 samples: glide the knobs, retune the filters, and see if
+        // an effect was asked for. That's plenty for slow glides.
         if self.until_retune == 0 {
             self.until_retune = 64;
-            for (i, k) in [
-                Knob::Gain,
-                Knob::Cutoff,
-                Knob::Hiss,
-                Knob::Band,
-                Knob::Breath,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let step = 1.0 - (-64.0 / (GLIDE[i] * self.rate)).exp();
-                self.now[i] += (self.controls.get(k) - self.now[i]) * step;
+            for (i, (k, glide)) in GLIDING.iter().enumerate() {
+                let step = 1.0 - (-64.0 / (glide * self.rate)).exp();
+                self.now[i] += (self.controls.get(*k) - self.now[i]) * step;
             }
             // A slow breath on the filter, so the drone never sits perfectly still.
             let breath = (self.breath_phase * std::f32::consts::TAU).sin() * 40.0;
-            self.low.tune(
-                true,
-                self.now[Knob::Cutoff as usize] + breath,
-                4.0,
-                self.rate,
+            self.low
+                .tune(true, self.knob(Knob::Cutoff) + breath, 4.0, self.rate);
+            self.band.tune(false, self.knob(Knob::Band), 0.8, self.rate);
+            let (f, c) = (
+                self.controls.count(Knob::Flinches),
+                self.controls.count(Knob::Chimes),
             );
-            self.band
-                .tune(false, self.now[Knob::Band as usize], 0.8, self.rate);
+            if f != self.flinches_seen {
+                self.flinches_seen = f;
+                self.flinch = 1.0;
+            }
+            if c != self.chimes_seen {
+                self.chimes_seen = c;
+                self.chime = 1.0;
+            }
         }
         self.until_retune -= 1;
-        self.breath_phase = (self.breath_phase + self.now[Knob::Breath as usize] / self.rate) % 1.0;
+        self.breath_phase = (self.breath_phase + self.knob(Knob::Breath) / self.rate) % 1.0;
 
         let mut tone = 0.0;
         for (phase, &(freq, cents, gain, shape)) in self.phases.iter_mut().zip(&OSCS) {
@@ -203,20 +253,45 @@ impl Synth {
         self.seed ^= self.seed << 5;
         let white = self.seed as f32 / u32::MAX as f32 * 2.0 - 1.0;
         self.brown = (self.brown + white * 0.02) / 1.02;
-        let hiss = self.band.run(self.brown * 3.5) * self.now[Knob::Hiss as usize];
+        let hiss = self.band.run(self.brown * 3.5) * self.knob(Knob::Hiss);
+        let drone = (self.low.run(tone) + hiss) * self.knob(Knob::Gain);
 
-        (self.low.run(tone) + hiss) * self.now[Knob::Gain as usize]
+        (drone + self.effects() * self.knob(Knob::FxGain)).clamp(-1.0, 1.0)
+    }
+
+    /// The effects' sample: a falling whoomp and a two-note chime, each
+    /// dying away on its own envelope.
+    fn effects(&mut self) -> f32 {
+        let mut out = 0.0;
+        if self.flinch > 1e-4 {
+            // From 130 Hz down to 40 as it fades, with a breath of noise.
+            let f = 40.0 + 90.0 * self.flinch;
+            self.flinch_phase = (self.flinch_phase + f / self.rate) % 1.0;
+            let body = (self.flinch_phase * std::f32::consts::TAU).sin();
+            out += (body * 0.8 + self.brown * 4.0 * self.flinch) * self.flinch;
+            self.flinch *= (-1.0 / (0.25 * self.rate)).exp();
+        }
+        if self.chime > 1e-4 {
+            // E6 and B6, a fifth apart, the upper one quieter.
+            for (phase, f) in self.chime_phases.iter_mut().zip([1318.5, 1975.5]) {
+                *phase = (*phase + f / self.rate) % 1.0;
+            }
+            let [a, b] = self.chime_phases.map(|p| (p * std::f32::consts::TAU).sin());
+            out += (a * 0.35 + b * 0.18) * self.chime;
+            self.chime *= (-1.0 / (0.5 * self.rate)).exp();
+        }
+        out
     }
 }
 
-/// The drone's output stream and the knobs that steer it.
-struct Drone {
+/// The audio stream (drone and effects) and the knobs that steer it.
+struct Stream {
     _stream: cpal::Stream,
     controls: Arc<Controls>,
 }
 
-impl Drone {
-    fn open() -> Result<Drone, String> {
+impl Stream {
+    fn open() -> Result<Stream, String> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or("no speakers")?;
@@ -224,12 +299,12 @@ impl Drone {
         let channels = supported.channels() as usize;
         let controls = Arc::new(Controls::new());
         let mut synth = Synth::new(supported.sample_rate() as f32, Arc::clone(&controls));
-        let on_error = |err| eprintln!("voice error: {err}");
+        let on_error = |err| eprintln!("sound error: {err}");
         let config = supported.config();
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 config,
-                // Same sample on every channel: the drone is mono.
+                // Same sample on every channel: it's all mono.
                 move |out: &mut [f32], _: &_| {
                     for frame in out.chunks_mut(channels) {
                         frame.fill(synth.next());
@@ -242,7 +317,7 @@ impl Drone {
                 config,
                 move |out: &mut [i16], _: &_| {
                     for frame in out.chunks_mut(channels) {
-                        frame.fill((synth.next().clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                        frame.fill((synth.next() * i16::MAX as f32) as i16);
                     }
                 },
                 on_error,
@@ -252,19 +327,20 @@ impl Drone {
         }
         .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(Drone {
+        Ok(Stream {
             _stream: stream,
             controls,
         })
     }
 }
 
-/// The voice as the app sees it: drone plus speech, on or off together.
+/// The voice as the app sees it: drone, effects and speech, each at the
+/// level the mixer gives it.
 pub struct Voice {
-    drone: Option<Drone>,
+    stream: Option<Stream>,
     speech: Option<tts::Tts>,
-    enabled: bool,
-    /// When the drone, having faded out, should let the speakers go.
+    levels: Levels,
+    /// When the stream, having faded out, should let the speakers go.
     release_at: Option<Instant>,
     swell: f32,
     duck: f32,
@@ -279,9 +355,9 @@ fn approach(cur: f32, target: f32, rate: f32, dt: f32) -> f32 {
 impl Voice {
     pub fn new() -> Voice {
         Voice {
-            drone: None,
+            stream: None,
             speech: None,
-            enabled: false,
+            levels: Levels::default(),
             release_at: None,
             swell: 0.0,
             duck: 0.0,
@@ -290,32 +366,55 @@ impl Voice {
         }
     }
 
-    pub fn set_enabled(&mut self, on: bool) {
-        if on == self.enabled {
+    /// Follows the mixer: opens what's needed, fades out what's muted.
+    pub fn apply(&mut self, levels: Levels) {
+        if levels == self.levels {
             return;
         }
-        self.enabled = on;
-        if on {
+        self.levels = levels;
+        let wants_stream = levels.music > 0.0 || levels.fx > 0.0;
+        if wants_stream {
             self.release_at = None;
-            if self.drone.is_none() {
-                self.drone = Drone::open()
-                    .map_err(|err| eprintln!("no drone: {err}"))
+            if self.stream.is_none() {
+                self.stream = Stream::open()
+                    .map_err(|err| eprintln!("no sound: {err}"))
                     .ok();
             }
+        } else if self.stream.is_some() && self.release_at.is_none() {
+            if let Some(s) = &self.stream {
+                s.controls.set(Knob::Gain, 0.0);
+                s.controls.set(Knob::FxGain, 0.0);
+            }
+            self.release_at = Some(Instant::now() + FADE_OUT);
+        }
+        if let Some(s) = &self.stream {
+            s.controls.set(Knob::FxGain, FX_GAIN * levels.fx);
+        }
+        if levels.voice > 0.0 {
             if self.speech.is_none() {
                 self.speech = open_speech()
                     .map_err(|err| eprintln!("no speech: {err}"))
                     .ok();
             }
-        } else {
             if let Some(tts) = &mut self.speech {
-                let _ = tts.stop();
+                let _ = tts.set_volume(SPEECH_VOLUME * levels.voice);
             }
+        } else if let Some(tts) = &mut self.speech {
+            let _ = tts.stop();
             self.asked_to_speak = false;
-            if let Some(d) = &self.drone {
-                d.controls.set(Knob::Gain, 0.0);
-            }
-            self.release_at = Some(Instant::now() + FADE_OUT);
+        }
+    }
+
+    /// Plays a sound effect, if effects are on.
+    pub fn effect(&self, effect: Effect) {
+        if self.levels.fx <= 0.0 {
+            return;
+        }
+        if let Some(s) = &self.stream {
+            s.controls.bump(match effect {
+                Effect::Flinch => Knob::Flinches,
+                Effect::Chime => Knob::Chimes,
+            });
         }
     }
 
@@ -323,7 +422,7 @@ impl Voice {
     pub fn update(&mut self, s: &Frame, dt: f32) {
         if self.release_at.is_some_and(|t| Instant::now() >= t) {
             // Faded out: dropping the stream lets the speakers go.
-            self.drone = None;
+            self.stream = None;
             self.release_at = None;
         }
         // Notice when a spoken line has finished.
@@ -331,10 +430,10 @@ impl Voice {
             self.asked_to_speak = false;
             self.quiet_since = Some(Instant::now());
         }
-        if !self.enabled {
+        if self.release_at.is_some() {
             return;
         }
-        let Some(drone) = &self.drone else { return };
+        let Some(stream) = &self.stream else { return };
         let target =
             ((s.heat * 0.55 + s.flare * 0.8) as f32).clamp(0.0, 1.0) * (1.0 - s.dim as f32 * 0.75);
         // Swell up fast, sink back slowly.
@@ -352,11 +451,12 @@ impl Voice {
             dt,
         );
 
-        let c = &drone.controls;
+        let c = &stream.controls;
         let sw = self.swell;
+        let music = self.levels.music;
         c.set(
             Knob::Gain,
-            (REST_GAIN + (PEAK_GAIN - REST_GAIN) * sw * sw) * (1.0 - self.duck * 0.7),
+            (REST_GAIN + (PEAK_GAIN - REST_GAIN) * sw * sw) * (1.0 - self.duck * 0.7) * music,
         );
         c.set(
             Knob::Cutoff,
@@ -373,10 +473,10 @@ impl Voice {
         c.set(Knob::Breath, breath);
     }
 
-    /// Speaks a line in a low, slow voice. Never queues: if it's still
-    /// talking, the line is skipped.
+    /// Speaks a line in a low, slow voice, if the Voice channel is on.
+    /// Never queues: if it's still talking, the line is skipped.
     pub fn say(&mut self, text: &str) -> bool {
-        if !self.enabled || self.engine_speaking() {
+        if self.levels.voice <= 0.0 || self.engine_speaking() {
             return false;
         }
         let Some(tts) = &mut self.speech else {
@@ -434,7 +534,7 @@ fn open_speech() -> Result<tts::Tts, String> {
     }
     let _ = tts.set_pitch(0.3_f32.max(tts.min_pitch()));
     let _ = tts.set_rate(0.72_f32.max(tts.min_rate()));
-    let _ = tts.set_volume(0.6);
+    let _ = tts.set_volume(SPEECH_VOLUME);
     Ok(tts)
 }
 
@@ -442,18 +542,23 @@ fn open_speech() -> Result<tts::Tts, String> {
 mod tests {
     use super::*;
 
+    fn run(synth: &mut Synth, secs: f32) -> f32 {
+        let mut peak = 0.0f32;
+        for _ in 0..(48_000.0 * secs) as usize {
+            let s = synth.next();
+            assert!(s.is_finite());
+            peak = peak.max(s.abs());
+        }
+        peak
+    }
+
     #[test]
     fn the_drone_is_quiet_and_never_blows_up() {
         let controls = Arc::new(Controls::new());
         controls.set(Knob::Gain, PEAK_GAIN);
         controls.set(Knob::Cutoff, PEAK_CUTOFF);
         let mut synth = Synth::new(48_000.0, Arc::clone(&controls));
-        let mut peak = 0.0f32;
-        for _ in 0..48_000 * 2 {
-            let s = synth.next();
-            assert!(s.is_finite());
-            peak = peak.max(s.abs());
-        }
+        let peak = run(&mut synth, 2.0);
         assert!(peak > 0.005, "it makes a sound: {peak}");
         assert!(peak < 0.5, "but a quiet one: {peak}");
     }
@@ -462,5 +567,28 @@ mod tests {
     fn silent_until_turned_up() {
         let mut synth = Synth::new(48_000.0, Arc::new(Controls::new()));
         assert!((0..4800).all(|_| synth.next() == 0.0));
+    }
+
+    #[test]
+    fn effects_play_on_their_own_channel() {
+        let controls = Arc::new(Controls::new());
+        let mut synth = Synth::new(48_000.0, Arc::clone(&controls));
+        // The drone is muted (gain 0); effects are on.
+        controls.set(Knob::FxGain, FX_GAIN);
+        run(&mut synth, 0.1);
+        controls.bump(Knob::Flinches);
+        let flinch = run(&mut synth, 0.3);
+        assert!(flinch > 0.01, "a flinch sounds: {flinch}");
+        // And they ring out on their own.
+        run(&mut synth, 3.0);
+        assert!(run(&mut synth, 0.1) < 1e-3);
+    }
+
+    #[test]
+    fn muted_effects_stay_silent() {
+        let controls = Arc::new(Controls::new());
+        let mut synth = Synth::new(48_000.0, Arc::clone(&controls));
+        controls.bump(Knob::Chimes);
+        assert_eq!(run(&mut synth, 0.5), 0.0);
     }
 }

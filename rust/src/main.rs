@@ -8,7 +8,7 @@
 //!   --senses         open Blinki's Senses at start (also Ctrl+Alt+B, or the tray)
 //!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
 //!   --whisper=TEXT   show TEXT as a whisper once the eye opens (for captures)
-//!   --voice          turn the drone and spoken whispers on for this run, without saving it
+//!   --voice          turn all sound (music, voice, effects) on for this run, without saving it
 //!   --blind          start blinded this run (camera and mic off), without saving it
 //!
 //! Left-drag moves the eye; right-click it (or the tray icon) for the menu.
@@ -31,6 +31,7 @@ mod prefs;
 mod senses;
 mod senses_panel;
 mod session;
+mod sound;
 mod tray;
 mod voice;
 mod whisper;
@@ -59,7 +60,7 @@ use senses::camera::Eyes;
 use senses::face::YuNet;
 use senses::mic::Ears;
 use tray::{Action, Tray};
-use voice::Voice;
+use voice::{Effect, Voice};
 use whisper::{School, Whispers};
 
 use camera_picker::{CameraPicker, Picked};
@@ -540,6 +541,8 @@ struct App {
     spoken: usize,
     /// A whisper to put on screen once the frame's GPU work is at hand.
     pending_whisper: Option<&'static str>,
+    /// The startle the flinch effect last played for.
+    last_flinch_sound: f64,
     /// Proof this is the only copy running; another launch pokes it awake.
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
@@ -670,6 +673,12 @@ impl App {
             self.voice.say(text);
         }
         self.voice.update(&s, dt as f32);
+        // A new startle: the flinch effect.
+        let startle = self.mind.insight().last_startle;
+        if startle > self.last_flinch_sound {
+            self.last_flinch_sound = startle;
+            self.voice.effect(Effect::Flinch);
+        }
 
         // The mood: which of the studio's looks fits what's happening.
         let level = heard;
@@ -807,6 +816,7 @@ impl App {
             display: world.map(|w| w.display),
             idle: desktop::idle_secs(),
             clock: desktop::local_time(),
+            sound: self.prefs.sound,
             camera: self.prefs.camera.as_ref().map_or_else(
                 || "top middle of the main screen (default)".to_string(),
                 |c| c.describe(),
@@ -958,9 +968,9 @@ impl App {
                 self.set_senses(!on);
             }
             Action::Whispers(on) => self.prefs.whispers = on,
-            Action::Voice(on) => {
-                self.prefs.voice = on;
-                self.voice.set_enabled(on);
+            Action::Mute(channel, on) => {
+                channel.set(&mut self.prefs.sound, on);
+                self.apply_sound();
             }
             Action::LookAtMe => {
                 // The face the camera sees now, wherever it is, becomes "sitting normally".
@@ -999,6 +1009,12 @@ impl App {
         if let Some(tray) = &self.tray {
             tray.refresh(&self.prefs, self.presence.shown());
         }
+    }
+
+    /// Hands the mixer to the voice, and keeps Electron's "voice" key in step.
+    fn apply_sound(&mut self) {
+        self.voice.apply(self.prefs.sound.levels());
+        self.prefs.voice = self.prefs.sound.audible();
     }
 
     /// Shows the window (after a clear frame, so no black box) and opens the eye.
@@ -1179,6 +1195,7 @@ impl ApplicationHandler for App {
                 };
                 let state = self.step(&gpu.window);
                 if let Some(text) = self.pending_whisper.take() {
+                    self.voice.effect(Effect::Chime);
                     gpu.whispers
                         .show(text, School::of_mood(&self.moods.current().name));
                 }
@@ -1209,7 +1226,14 @@ impl ApplicationHandler for App {
                 }
                 // Blinki's Senses follows along, one picture per eye frame.
                 if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot) {
-                    panel.draw(&gpu.device, &gpu.queue, snap);
+                    if let Some(sound) = panel.draw(&gpu.device, &gpu.queue, snap) {
+                        self.prefs.sound = sound;
+                        self.apply_sound();
+                        self.prefs.save();
+                        if let Some(tray) = &self.tray {
+                            tray.refresh(&self.prefs, self.presence.shown());
+                        }
+                    }
                 }
                 if snap_due {
                     if let Err(err) = self.snap(&mut gpu, &state) {
@@ -1348,7 +1372,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // --blind blinds this run only; the saved pref is untouched unless the
     // menu changes something.
     prefs.blind |= args.blind;
-    prefs.voice |= args.voice;
+    if args.voice {
+        // --voice: everything audible, this run only.
+        prefs.sound = sound::Sound {
+            master: true,
+            music: true,
+            voice: true,
+            fx: true,
+            ..prefs.sound
+        };
+    }
     let mut app = App {
         args,
         gpu: None,
@@ -1384,10 +1417,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         voice: Voice::new(),
         spoken: 0,
         pending_whisper: None,
+        last_flinch_sound: f64::NEG_INFINITY,
         _hotkeys: hotkeys,
         instance,
     };
-    app.voice.set_enabled(app.prefs.voice);
+    app.apply_sound();
     event_loop.run_app(&mut app)?;
     Ok(())
 }
