@@ -424,7 +424,9 @@ impl Gpu {
             let (w, h) = self.size();
             let mut rgba = Vec::new();
             for y in 0..h as usize {
-                for px in data[y * row as usize..y * row as usize + w as usize * 4].chunks_exact(4)
+                for px in data[y * row as usize..y * row as usize + w as usize * 4]
+                    .as_chunks::<4>()
+                    .0
                 {
                     rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
                 }
@@ -1403,7 +1405,7 @@ impl ApplicationHandler for App {
 /// premultiplied, so "over" is just `colour + backdrop * (1 - alpha)`.
 fn write_snap(path: &str, (w, h): (u32, u32), rgba: &[u8]) -> Result<(), Box<dyn Error>> {
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let keep = 255 - px[3] as u32;
         for i in 0..3 {
             let v = px[i] as u32 + (SNAP_BACKDROP[i] as u32 * keep + 127) / 255;
@@ -1422,7 +1424,7 @@ fn write_snap(path: &str, (w, h): (u32, u32), rgba: &[u8]) -> Result<(), Box<dyn
 /// has all three: clear corners, a glowing fringe, a solid sphere.
 fn alpha_census(rgba: &[u8]) -> (usize, usize, usize) {
     let mut counts = (0, 0, 0);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         match px[3] {
             0 => counts.0 += 1,
             255 => counts.2 += 1,

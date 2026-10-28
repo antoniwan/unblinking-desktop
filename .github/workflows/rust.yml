@@ -28,7 +28,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned so a new Rust release can't add clippy lints and turn CI red
+      # overnight. Bump it on purpose, and fix the new lints in the same commit.
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
 
