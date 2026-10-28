@@ -27,7 +27,11 @@ Done so far:
   written under the eye in Tiny5, letter by letter, with an entrance from the
   mood's school of magic: Pyromancy, Arcane, Umbral, Storm, Fae, Druidic,
   Astral or Warding.
-- Blinki's Senses, a window that shows what the eye perceives (see below).
+- Blinki's Senses, a window that shows what the eye perceives. Open it from
+  the tray or with Ctrl+Alt+B.
+- "Where's my camera?" (in the tray): your monitors as they're laid out.
+  Drag the camera to where your webcam sits, and the eye aims from there.
+  "Look at me" fine-tunes it.
 - Opening and closing. The eye eases open over 0.9 s, and fades out over
   0.6 s before it hides or quits. The window only shows after a transparent
   first frame, so there's no black box.
@@ -45,6 +49,7 @@ the menu. A left click on the tray icon shows or hides it.
 | --- | --- |
 | `--snap=MS` | After MS milliseconds, saves the frame over a dark backdrop to `snap.png` in the current folder, then quits. |
 | `--backend=dx12` or `--backend=vulkan` | Uses only that backend. By default it tries DX12 first, then Vulkan. |
+| `--camera` | Opens "Where's my camera?" at start. |
 | `--senses` | Opens Blinki's Senses at start. Ctrl+Alt+B or the tray also open it. |
 | `--mood=NAME` | Holds one of the studio's moods. |
 | `--whisper=TEXT` | Shows TEXT as a whisper once the eye opens. |

@@ -30,6 +30,8 @@ pub struct Prefs {
     pub position: Option<Position>,
     /// The "Look at me" calibration, in metres (Rust app only).
     pub look_offset: Option<Position>,
+    /// Where the webcam sits, from "Where's my camera?" (Rust app only).
+    pub camera: Option<crate::placement::CameraSpot>,
 }
 
 impl Default for Prefs {
@@ -41,6 +43,7 @@ impl Default for Prefs {
             voice: false,
             position: None,
             look_offset: None,
+            camera: None,
         }
     }
 }
@@ -105,6 +108,10 @@ impl Prefs {
         };
         prefs.position = point("position");
         prefs.look_offset = point("lookOffset");
+        prefs.camera = saved
+            .get("camera")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok());
         prefs
     }
 

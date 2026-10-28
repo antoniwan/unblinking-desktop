@@ -18,9 +18,10 @@ use std::sync::Arc;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2 as EVec2};
 use image::RgbImage;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window, WindowId};
+use winit::window::WindowId;
 
 use crate::desktop::{Point, Rect as DRect};
+use crate::egui_window::EguiWindow;
 use crate::mind::{BANG_LEVEL, Frame, Insight, Line, Mode, Vec2};
 use crate::senses::Detection;
 
@@ -54,89 +55,36 @@ pub struct Snapshot {
     pub display: Option<DRect>,
     pub idle: Option<f64>,
     pub clock: (u32, u32),
+    /// Where the webcam is set to be, in words.
+    pub camera: String,
 }
 
 pub struct SensesPanel {
-    pub window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    ctx: egui::Context,
-    state: egui_winit::State,
-    renderer: egui_wgpu::Renderer,
+    win: EguiWindow,
     picture: Option<(Arc<RgbImage>, egui::TextureHandle)>,
 }
 
 impl SensesPanel {
     pub fn new(
         event_loop: &ActiveEventLoop,
-        instance: &wgpu::Instance,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
+        gpu: (&wgpu::Instance, &wgpu::Adapter, &wgpu::Device),
     ) -> Result<SensesPanel, Box<dyn Error>> {
-        let attrs = Window::default_attributes()
-            .with_title("Blinki's Senses")
-            .with_inner_size(winit::dpi::LogicalSize::new(1080.0, 720.0))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(760.0, 520.0));
-        let window = Arc::new(event_loop.create_window(attrs)?);
-        let surface = instance.create_surface(window.clone())?;
-        let caps = surface.get_capabilities(adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            // No vsync wait here: the eye's own present already paces the
-            // loop, and waiting twice per frame would halve its frame rate.
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-            color_space: Default::default(),
-            view_formats: vec![],
-        };
-        surface.configure(device, &config);
-
-        let ctx = egui::Context::default();
-        ctx.set_visuals(egui::Visuals::dark());
-        ctx.set_fonts(crate::fonts::blinki());
-        let state = egui_winit::State::new(
-            ctx.clone(),
-            egui::ViewportId::ROOT,
-            &window,
-            Some(window.scale_factor() as f32),
-            None,
-            Some(device.limits().max_texture_dimension_2d as usize),
-        );
-        let renderer = egui_wgpu::Renderer::new(device, format, Default::default());
-        Ok(SensesPanel {
-            window,
-            surface,
-            config,
-            ctx,
-            state,
-            renderer,
-            picture: None,
-        })
+        let win = EguiWindow::new(
+            event_loop,
+            gpu,
+            "Blinki's Senses",
+            (1080.0, 720.0),
+            (760.0, 520.0),
+        )?;
+        Ok(SensesPanel { win, picture: None })
     }
 
     pub fn id(&self) -> WindowId {
-        self.window.id()
+        self.win.id()
     }
 
-    /// Passes a window event to egui; resizes the surface when needed.
     pub fn on_event(&mut self, device: &wgpu::Device, event: &winit::event::WindowEvent) {
-        if let winit::event::WindowEvent::Resized(size) = event {
-            self.config.width = size.width.max(1);
-            self.config.height = size.height.max(1);
-            self.surface.configure(device, &self.config);
-        }
-        let _ = self.state.on_window_event(&self.window, event);
+        self.win.on_event(device, event);
     }
 
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, snap: &Snapshot) {
@@ -158,7 +106,8 @@ impl SensesPanel {
                     }
                     None => {
                         let tex =
-                            self.ctx
+                            self.win
+                                .ctx
                                 .load_texture("sight", image, egui::TextureOptions::LINEAR);
                         self.picture = Some((pic.clone(), tex));
                     }
@@ -169,100 +118,27 @@ impl SensesPanel {
             self.picture = None;
         }
         let picture = self.picture.as_ref().map(|(_, t)| t.id());
-
-        let raw = self.state.take_egui_input(&self.window);
-        let out = self.ctx.run_ui(raw, |ui| scrying(ui, snap, picture));
-        self.state
-            .handle_platform_output(&self.window, out.platform_output);
-        let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
-        // Texture changes must all be used: upload the new ones now, and free
-        // the old ones once this frame is out (or skipped).
-        let mut textures = out.textures_delta;
-        for (id, deltas) in textures.set.drain() {
-            for delta in &deltas {
-                self.renderer.update_texture(device, queue, id, delta);
-            }
-        }
-        let free = std::mem::take(&mut textures.free);
-        self.present(device, queue, &prims, out.pixels_per_point);
-        for id in &free {
-            self.renderer.free_texture(id);
-        }
-    }
-
-    fn present(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        prims: &[egui::ClippedPrimitive],
-        pixels_per_point: f32,
-    ) {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(device, &self.config);
-                return;
-            }
-            other => {
-                eprintln!("senses: no frame ({other:?})");
-                return;
-            }
-        };
-        let view = frame.texture.create_view(&Default::default());
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point,
-        };
-        let mut encoder = device.create_command_encoder(&Default::default());
-        let extra = self
-            .renderer
-            .update_buffers(device, queue, &mut encoder, prims, &screen);
-        {
-            // egui's renderer wants a pass with no borrowed lifetime;
-            // `forget_lifetime` trades the compile-time check for a runtime one.
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("senses"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-            self.renderer.render(&mut pass, prims, &screen);
-        }
-        queue.submit(extra.into_iter().chain([encoder.finish()]));
-        self.window.pre_present_notify();
-        queue.present(frame);
+        self.win
+            .draw(device, queue, |ui| scrying(ui, snap, picture));
     }
 }
 
 // ---------------------------------------------------------------- drawing --
 
 /// The mood's colours as egui colours, plus a few fixed inks.
-struct Ink {
-    deep: Color32,
-    flame: Color32,
-    core: Color32,
-    glow: Color32,
-    paper: Color32,
-    panel: Color32,
-    text: Color32,
-    faint: Color32,
+pub(crate) struct Ink {
+    pub deep: Color32,
+    pub flame: Color32,
+    pub core: Color32,
+    pub glow: Color32,
+    pub paper: Color32,
+    pub panel: Color32,
+    pub text: Color32,
+    pub faint: Color32,
 }
 
 impl Ink {
-    fn of(colors: &[[f32; 3]; 4]) -> Ink {
+    pub(crate) fn of(colors: &[[f32; 3]; 4]) -> Ink {
         let c = |[r, g, b]: [f32; 3]| {
             Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
         };
@@ -279,7 +155,7 @@ impl Ink {
     }
 }
 
-fn with_alpha(c: Color32, a: f32) -> Color32 {
+pub(crate) fn with_alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0) as u8)
 }
 
@@ -343,7 +219,7 @@ fn scrying(ui: &mut egui::Ui, snap: &Snapshot, picture: Option<egui::TextureId>)
 }
 
 /// Faint concentric rings and rune ticks behind everything, turning slowly.
-fn arcane_circle(p: &egui::Painter, full: Rect, ink: &Ink, t: f32) {
+pub(crate) fn arcane_circle(p: &egui::Painter, full: Rect, ink: &Ink, t: f32) {
     let c = full.center();
     let r = full.width().min(full.height()) * 0.62;
     for (i, k) in [1.0f32, 0.82, 0.64].iter().enumerate() {
@@ -365,7 +241,7 @@ fn arcane_circle(p: &egui::Painter, full: Rect, ink: &Ink, t: f32) {
 }
 
 /// A lens frame: a dark glass with a glowing rim and a title. Returns the inside.
-fn lens(p: &egui::Painter, r: Rect, title: &str, ink: &Ink) -> Rect {
+pub(crate) fn lens(p: &egui::Painter, r: Rect, title: &str, ink: &Ink) -> Rect {
     // A soft outer glow: a few wider, fainter rims.
     for (w, a) in [(7.0, 0.04), (4.0, 0.07), (2.0, 0.12)] {
         p.rect_stroke(
@@ -798,6 +674,7 @@ fn world_lens(p: &egui::Painter, r: Rect, snap: &Snapshot, ink: &Ink) {
             }),
         ),
         ("clock", format!("{:02}:{:02}", snap.clock.0, snap.clock.1)),
+        ("camera", snap.camera.clone()),
         ("full screen", "not watched yet".into()),
     ];
     let mut y = r.min.y;
@@ -821,7 +698,7 @@ fn world_lens(p: &egui::Painter, r: Rect, snap: &Snapshot, ink: &Ink) {
 }
 
 /// A four-pointed star, the panel's mark.
-fn star(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
+pub(crate) fn star(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
     let pts: Vec<Pos2> = (0..8)
         .map(|i| {
             let a = i as f32 * std::f32::consts::FRAC_PI_4 - std::f32::consts::FRAC_PI_2;
@@ -841,7 +718,7 @@ fn star(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
 }
 
 /// A small diamond marking each lens title.
-fn diamond(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
+pub(crate) fn diamond(p: &egui::Painter, c: Pos2, r: f32, color: Color32) {
     let pts = vec![
         c + EVec2::new(0.0, -r),
         c + EVec2::new(r, 0.0),
@@ -857,7 +734,7 @@ fn bar(p: &egui::Painter, r: Rect, v: f32, color: Color32, ink: &Ink) {
     p.rect_filled(fill, CornerRadius::same(3), color);
 }
 
-fn centered_note(p: &egui::Painter, r: Rect, text: &str, ink: &Ink) {
+pub(crate) fn centered_note(p: &egui::Painter, r: Rect, text: &str, ink: &Ink) {
     p.text(
         r.center(),
         Align2::CENTER_CENTER,

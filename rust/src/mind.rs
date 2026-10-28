@@ -101,7 +101,7 @@ pub const REST_SEAT: Vec2 = Vec2::new(0.0, 0.08);
 
 /// Where a face is in the room, in metres from the camera: x to the right
 /// and y down as you see the screen, and z toward you. The camera is
-/// assumed to sit at the top centre of the monitor, as most do.
+/// assumed to face you square on, wherever it's clipped.
 ///
 /// The camera image isn't mirrored, so a face on the image's left is on
 /// your right. Distance comes from how wide the face looks.
@@ -126,6 +126,8 @@ pub struct World {
     /// pixels; the pixel constants below are multiplied by this so they
     /// mean the same distance on a high-DPI screen.
     pub scale: f64,
+    /// Where the webcam is on the desktop (see placement.rs).
+    pub camera: Point,
     /// Screen pixels per metre, to place the eye in the room.
     pub px_per_m: f64,
     /// Subtracted from where faces seem to be, in metres: the "Look at me"
@@ -342,10 +344,9 @@ impl Mind {
         };
         let [ux, uy, uz] = face_in_room(face);
         let (ux, uy) = (ux - world.look_offset.x, uy - world.look_offset.y);
-        // The eye, in metres from the camera at the top centre of its monitor.
-        let d = world.display;
-        let ex = (world.eye.x - (d.x + d.width / 2.0)) / world.px_per_m;
-        let ey = (world.eye.y - d.y) / world.px_per_m;
+        // The eye, in metres from the camera.
+        let ex = (world.eye.x - world.camera.x) / world.px_per_m;
+        let ey = (world.eye.y - world.camera.y) / world.px_per_m;
         // The shader turns the pupil toward normalize(g.x * 0.85, g.y * 0.7, 1),
         // so this is the gaze whose pupil points along (eye -> you).
         let (vx, vy) = ((ux - ex) / uz, (uy - ey) / uz);
@@ -679,7 +680,8 @@ mod tests {
                 height: 1080.0,
             },
             scale: 1.0,
-            px_per_m: 4000.0, // a 1920 px wide, 48 cm wide screen
+            camera: Point { x: 960.0, y: 0.0 }, // top middle
+            px_per_m: 4000.0,                   // a 1920 px wide, 48 cm wide screen
             look_offset: Vec2::default(),
         }
     }
@@ -783,6 +785,46 @@ mod tests {
         };
         run(&mut m, 8.0, &senses(&[a, b]));
         assert!(kinds(&said).contains(&Line::Crowd));
+    }
+
+    /// Same face, same eye; only the camera moves. With the camera at the
+    /// bottom of the screen, a face in the middle of its picture is down
+    /// there, so the eye in the top corner looks further down.
+    #[test]
+    fn where_the_camera_sits_changes_where_it_looks() {
+        let look = |camera: Point| {
+            let mut w = world(Point { x: 0.0, y: 0.0 });
+            w.eye = Point {
+                x: 1760.0,
+                y: 160.0,
+            };
+            w.camera = camera;
+            let (mut m, _) = mind();
+            let f = Face {
+                size: 0.18,
+                ..face(0.5, 0.5)
+            };
+            run(
+                &mut m,
+                2.0,
+                &Senses {
+                    world: Some(w),
+                    ..senses(&[f])
+                },
+            )
+            .gaze
+        };
+        let top = look(Point { x: 960.0, y: 0.0 });
+        let bottom = look(Point {
+            x: 960.0,
+            y: 1080.0,
+        });
+        let right = look(Point {
+            x: 1920.0,
+            y: 540.0,
+        });
+        assert!(bottom.y < top.y - 0.3, "top {top:?} bottom {bottom:?}");
+        assert!(right.x > top.x + 0.3, "top {top:?} right {right:?}");
     }
 
     #[test]

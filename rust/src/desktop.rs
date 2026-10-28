@@ -87,6 +87,38 @@ pub fn pixels_per_metre() -> f64 {
     }
 }
 
+/// Pixels per metre of one monitor (by its Windows device name, such as
+/// "\\.\DISPLAY2"), from the size it reports. Falls back to a 54 cm wide screen.
+#[cfg(windows)]
+pub fn monitor_px_per_m(name: &str, width_px: f64) -> f64 {
+    use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC, GetDeviceCaps, HORZRES, HORZSIZE};
+    use windows::core::{HSTRING, PCWSTR};
+    let device = HSTRING::from(name);
+    let (px, mm) = unsafe {
+        let dc = CreateDCW(&HSTRING::from("DISPLAY"), &device, PCWSTR::null(), None);
+        if dc.is_invalid() {
+            (0, 0)
+        } else {
+            let caps = (
+                GetDeviceCaps(Some(dc), HORZRES),
+                GetDeviceCaps(Some(dc), HORZSIZE),
+            );
+            let _ = DeleteDC(dc);
+            caps
+        }
+    };
+    if px > 0 && mm > 100 {
+        px as f64 / (mm as f64 / 1000.0)
+    } else {
+        width_px / 0.54
+    }
+}
+
+#[cfg(not(windows))]
+pub fn monitor_px_per_m(_name: &str, width_px: f64) -> f64 {
+    width_px / 0.54
+}
+
 #[cfg(not(windows))]
 pub fn pixels_per_metre() -> f64 {
     4000.0

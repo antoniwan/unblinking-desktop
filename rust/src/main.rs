@@ -4,6 +4,7 @@
 //! Flags:
 //!   --snap=MS        after MS milliseconds, save the frame to snap.png and quit
 //!   --backend=NAME   force `dx12` or `vulkan` instead of trying both
+//!   --camera         open "Where's my camera?" at start (also in the tray)
 //!   --senses         open Blinki's Senses at start (also Ctrl+Alt+B, or the tray)
 //!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
 //!   --whisper=TEXT   show TEXT as a whisper once the eye opens (for captures)
@@ -18,11 +19,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 // Each `mod` line pulls in a file of the same name from src/.
+mod camera_picker;
 mod desktop;
+mod egui_window;
 mod eye;
 mod fonts;
 mod mind;
 mod moods;
+mod placement;
 mod prefs;
 mod senses;
 mod senses_panel;
@@ -57,8 +61,10 @@ use tray::{Action, Tray};
 use voice::Voice;
 use whisper::{School, Whispers};
 
+use camera_picker::{CameraPicker, Picked};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use placement::Monitor;
 use senses_panel::{LEVEL_HISTORY, SensesPanel, Snapshot};
 
 /// Window size in logical pixels (scaled by the monitor's DPI), as in main.js.
@@ -89,6 +95,7 @@ struct Args {
     blind: bool,
     mood: Option<String>,
     senses: bool,
+    camera: bool,
     voice: bool,
     whisper: Option<String>,
 }
@@ -101,6 +108,7 @@ impl Args {
             blind: false,
             mood: None,
             senses: false,
+            camera: false,
             voice: false,
             whisper: None,
         };
@@ -125,6 +133,8 @@ impl Args {
                 args.whisper = Some(text.to_string());
             } else if arg == "--voice" {
                 args.voice = true;
+            } else if arg == "--camera" {
+                args.camera = true;
             } else if arg == "--senses" {
                 args.senses = true;
             } else if arg == "--blind" {
@@ -506,6 +516,10 @@ struct App {
     px_per_m: f64,
     /// Blinki's Senses, while it's open, and what it shows.
     panel: Option<SensesPanel>,
+    /// "Where's my camera?", while it's open.
+    picker: Option<CameraPicker>,
+    /// The monitors as they're laid out, for placing the camera.
+    monitors: Vec<Monitor>,
     snapshot: Option<Snapshot>,
     levels: VecDeque<f32>,
     /// One flag per entry in `levels`: did it flinch on that frame?
@@ -530,6 +544,16 @@ impl App {
         let size = window.inner_size();
         let monitor = window.current_monitor()?;
         let (mp, ms) = (monitor.position(), monitor.size());
+        // Where the webcam is: the spot picked in "Where's my camera?", or
+        // the top middle of the main screen.
+        let (camera, px_per_m) = placement::locate(self.prefs.camera.as_ref(), &self.monitors)
+            .unwrap_or((
+                Point {
+                    x: mp.x as f64 + ms.width as f64 / 2.0,
+                    y: mp.y as f64,
+                },
+                self.px_per_m,
+            ));
         Some(World {
             cursor,
             eye: Point {
@@ -543,7 +567,8 @@ impl App {
                 height: ms.height as f64,
             },
             scale: window.scale_factor(),
-            px_per_m: self.px_per_m,
+            camera,
+            px_per_m,
             look_offset: self
                 .prefs
                 .look_offset
@@ -772,8 +797,49 @@ impl App {
             display: world.map(|w| w.display),
             idle: desktop::idle_secs(),
             clock: desktop::local_time(),
+            camera: self.prefs.camera.as_ref().map_or_else(
+                || "top middle of the main screen (default)".to_string(),
+                |c| c.describe(),
+            ),
             insight,
         });
+    }
+
+    /// Reads the monitors' layout and sizes, for placing the camera.
+    fn refresh_monitors(&mut self, window: &Window) {
+        let primary = window.primary_monitor();
+        self.monitors = window
+            .available_monitors()
+            .map(|m| {
+                let (p, s) = (m.position(), m.size());
+                let name = m.name().unwrap_or_default();
+                Monitor {
+                    px_per_m: desktop::monitor_px_per_m(&name, s.width as f64),
+                    primary: primary.as_ref() == Some(&m),
+                    rect: Rect {
+                        x: p.x as f64,
+                        y: p.y as f64,
+                        width: s.width as f64,
+                        height: s.height as f64,
+                    },
+                    name,
+                }
+            })
+            .collect();
+    }
+
+    /// Opens "Where's my camera?", or closes it.
+    fn toggle_picker(&mut self, event_loop: &ActiveEventLoop) {
+        if self.picker.take().is_some() {
+            return;
+        }
+        let Some(gpu) = &self.gpu else { return };
+        let window = gpu.window.clone();
+        match CameraPicker::new(event_loop, (&gpu.instance, &gpu.adapter, &gpu.device)) {
+            Ok(picker) => self.picker = Some(picker),
+            Err(err) => eprintln!("could not open Where's my camera?: {err}"),
+        }
+        self.refresh_monitors(&window);
     }
 
     /// Opens Blinki's Senses, or closes it (which also stops the camera preview).
@@ -786,9 +852,8 @@ impl App {
             return;
         }
         let Some(gpu) = &self.gpu else { return };
-        match SensesPanel::new(event_loop, &gpu.instance, &gpu.adapter, &gpu.device) {
+        match SensesPanel::new(event_loop, (&gpu.instance, &gpu.adapter, &gpu.device)) {
             Ok(panel) => {
-                panel.window.request_redraw();
                 self.panel = Some(panel);
                 if let Some(eyes) = &mut self.eyes {
                     eyes.set_preview(true);
@@ -868,6 +933,7 @@ impl App {
         match action {
             Action::Quit => self.close(AfterClose::Quit, event_loop),
             Action::Senses => self.toggle_senses(event_loop),
+            Action::WhereCamera => self.toggle_picker(event_loop),
             Action::ToggleShown if self.presence.shown() => {
                 self.close(AfterClose::Hide, event_loop)
             }
@@ -905,7 +971,10 @@ impl App {
                 let _ = window.set_cursor_hittest(!on);
             }
         }
-        if !matches!(action, Action::ToggleShown | Action::Quit | Action::Senses) {
+        if !matches!(
+            action,
+            Action::ToggleShown | Action::Quit | Action::Senses | Action::WhereCamera
+        ) {
             self.prefs.save();
         }
         if let Some(tray) = &self.tray {
@@ -1014,8 +1083,15 @@ impl ApplicationHandler for App {
                             .map_err(|err| eprintln!("no tray icon: {err}"))
                             .ok();
                         self.set_senses(!self.prefs.blind);
+                        if let Some(gpu) = &self.gpu {
+                            let window = gpu.window.clone();
+                            self.refresh_monitors(&window);
+                        }
                         if self.args.senses {
                             self.toggle_senses(event_loop);
+                        }
+                        if self.args.camera {
+                            self.toggle_picker(event_loop);
                         }
                         return;
                     }
@@ -1028,6 +1104,17 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Events for "Where's my camera?" go to the picker.
+        if let (Some(picker), Some(gpu)) = (&mut self.picker, &self.gpu)
+            && picker.id() == id
+        {
+            match event {
+                WindowEvent::CloseRequested => self.picker = None,
+                WindowEvent::RedrawRequested => {}
+                other => picker.on_event(&gpu.device, &other),
+            }
+            return;
+        }
         // Events for Blinki's Senses go to the panel.
         if let (Some(panel), Some(gpu)) = (&mut self.panel, &self.gpu)
             && panel.id() == id
@@ -1083,6 +1170,24 @@ impl ApplicationHandler for App {
                         .show(&text, School::of_mood(&self.moods.current().name));
                 }
                 gpu.render(&state);
+                // The camera picker too, saving each move as it's made.
+                if let Some(picker) = &mut self.picker {
+                    let colors = self.moods.now().display_colors();
+                    match picker.draw(
+                        &gpu.device,
+                        &gpu.queue,
+                        &self.monitors,
+                        self.prefs.camera.as_ref(),
+                        &colors,
+                    ) {
+                        Picked::Nothing => {}
+                        Picked::Moved(spot) => {
+                            self.prefs.camera = spot;
+                            self.prefs.save();
+                        }
+                        Picked::Close => self.picker = None,
+                    }
+                }
                 // Blinki's Senses follows along, one picture per eye frame.
                 if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot) {
                     panel.draw(&gpu.device, &gpu.queue, snap);
@@ -1218,6 +1323,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             ppm
         },
         panel: None,
+        picker: None,
+        monitors: Vec::new(),
         snapshot: None,
         levels: VecDeque::new(),
         flinch_marks: VecDeque::new(),
