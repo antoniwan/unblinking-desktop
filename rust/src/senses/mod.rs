@@ -5,6 +5,7 @@
 pub mod camera;
 pub mod face;
 pub mod mic;
+pub mod wake;
 
 use image::RgbImage;
 

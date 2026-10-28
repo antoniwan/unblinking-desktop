@@ -32,6 +32,8 @@ pub struct Prefs {
     pub look_offset: Option<Position>,
     /// Where the webcam sits, from "Where's my camera?" (Rust app only).
     pub camera: Option<crate::placement::CameraSpot>,
+    /// Listen for "Hey, OG Blinki" (Rust app only). Off by default.
+    pub wake_word: bool,
 }
 
 impl Default for Prefs {
@@ -44,6 +46,7 @@ impl Default for Prefs {
             position: None,
             look_offset: None,
             camera: None,
+            wake_word: false,
         }
     }
 }
@@ -97,6 +100,9 @@ impl Prefs {
         }
         if let Some(v) = flag("voice") {
             prefs.voice = v;
+        }
+        if let Some(v) = flag("wakeWord") {
+            prefs.wake_word = v;
         }
         // Deserialize just these fields; a malformed one is dropped.
         let point = |key: &str| {
@@ -171,6 +177,7 @@ mod tests {
         };
         let text = serde_json::to_string(&p).unwrap();
         assert!(text.contains("\"clickThrough\":true"), "{text}");
+        assert!(text.contains("\"wakeWord\":false"), "{text}");
         assert_eq!(Prefs::from_json(&text), p);
     }
 }

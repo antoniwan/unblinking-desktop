@@ -58,6 +58,7 @@ use senses::Detector;
 use senses::camera::Eyes;
 use senses::face::YuNet;
 use senses::mic::Ears;
+use senses::wake::{Wake, WakeEvent};
 use tray::{Action, Tray};
 use voice::Voice;
 use whisper::{School, Whispers};
@@ -504,6 +505,8 @@ struct App {
     eyes: Option<Eyes>,
     /// The microphone, while the eye is allowed to hear.
     ears: Option<Ears>,
+    /// Listening for "Hey, OG Blinki", while that's on and it isn't blind.
+    wake: Option<Wake>,
     prefs: Prefs,
     tray: Option<Tray>,
     presence: Presence,
@@ -917,6 +920,7 @@ impl App {
         if !open {
             self.eyes = None;
             self.ears = None;
+            self.sync_wake();
             eprintln!("senses closed");
             return;
         }
@@ -932,6 +936,48 @@ impl App {
             self.ears = Ears::open()
                 .map_err(|err| eprintln!("no hearing: {err}"))
                 .ok();
+        }
+        self.sync_wake();
+    }
+
+    /// Starts or stops the wake word to match its toggle. Blind wins: a
+    /// blinded eye hears nothing, names included, and dropping the Wake
+    /// frees the mic.
+    fn sync_wake(&mut self) {
+        if !self.prefs.wake_word || self.prefs.blind {
+            self.wake = None;
+        } else if self.wake.is_none() {
+            // No name pref yet, so only "Hey, OG Blinki" and "Hey Blinki".
+            self.wake = Some(Wake::start(None));
+        }
+    }
+
+    /// Someone called it, or the wake word could not work here.
+    fn on_wake(&mut self, event: WakeEvent) {
+        match event {
+            WakeEvent::Heard(words) => {
+                eprintln!("wake word: heard {words:?}");
+                if !self.presence.shown() {
+                    self.appear();
+                }
+                self.mind.called();
+            }
+            WakeEvent::Failed(why) => {
+                // Said once: the toggle turns itself off, so this can't repeat
+                // until the user turns it back on.
+                eprintln!("wake word off: {why}");
+                self.wake = None;
+                self.prefs.wake_word = false;
+                self.prefs.save();
+                if self.prefs.whispers {
+                    const DEAF: &str = "I can't hear names on this computer yet.";
+                    self.pending_whisper = Some(DEAF);
+                    self.voice.say(DEAF);
+                }
+            }
+        }
+        if let Some(tray) = &self.tray {
+            tray.refresh(&self.prefs, self.presence.shown());
         }
     }
 
@@ -958,6 +1004,10 @@ impl App {
                 self.set_senses(!on);
             }
             Action::Whispers(on) => self.prefs.whispers = on,
+            Action::WakeWord(on) => {
+                self.prefs.wake_word = on;
+                self.sync_wake();
+            }
             Action::Voice(on) => {
                 self.prefs.voice = on;
                 self.voice.set_enabled(on);
@@ -1232,6 +1282,10 @@ impl ApplicationHandler for App {
         for action in actions {
             self.act(action, event_loop);
         }
+        let called = self.wake.as_ref().map_or_else(Vec::new, Wake::poll);
+        for event in called {
+            self.on_wake(event);
+        }
         // Launched again: show the eye (as Electron's 'second-instance').
         if self.instance.as_ref().is_some_and(|i| i.woken()) && !self.presence.shown() {
             self.appear();
@@ -1358,6 +1412,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         mode: None,
         eyes: None,
         ears: None,
+        wake: None,
         prefs,
         tray: None,
         presence: Presence::Hidden,
