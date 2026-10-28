@@ -694,13 +694,13 @@ impl App {
         let look = self.moods.now();
         self.flow = (self.flow + dt as f32 * look.flow) % 1.0;
 
-        // Opening, the eye grows and fades in with its pupil wide, then the
-        // pupil settles to what the mind wants. Closing, it narrows, cools,
-        // shrinks and fades to nothing.
         // The mind's frame, given a body: a gaze with weight and drift, a
         // restless pupil, breath, and a flinch (see motion.rs).
         let m = self.motion.update(dt, &s);
 
+        // Opening, the eye grows and fades in with its pupil wide, then the
+        // pupil settles to what the mind wants. Closing, it narrows, cools,
+        // shrinks and fades to nothing.
         let k = self.presence.amount();
         let closing = matches!(self.presence, Presence::Closing(..));
         let pupil = m.pupil;

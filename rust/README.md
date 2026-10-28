@@ -59,6 +59,15 @@ the menu. A left click on the tray icon shows or hides it.
 | `--bench-face` | Times the face model on a blank 1280x720 frame and quits. |
 | `--blind` | Starts blinded for this run only (camera and mic off), without saving it. |
 
+The eye's shader is four layers in `src/shaders`: `common.glsl` (uniforms,
+noise, the mood's fire ramp), `body.glsl` (the sphere, raymarched, with the
+fire inside it), `aura.glsl` (only light outside it: glows and embers) and
+`eye.frag` (lays the body over the aura). They're built into the exe, but
+with `UNBLINKING_SHADERS` set to a folder they're read from there, so a
+shader can be tuned by rerunning with `--snap` instead of rebuilding.
+`src/motion.rs` gives the mind's wishes a body: a springy gaze, breath,
+a restless pupil and a flinch, which the shader reads.
+
 ```bash
 cargo test
 ```
