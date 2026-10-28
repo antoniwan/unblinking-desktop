@@ -30,6 +30,9 @@ pub struct Prefs {
     pub position: Option<Position>,
     /// The "Look at me" calibration, in metres (Rust app only).
     pub look_offset: Option<Position>,
+    /// Music, Voice and FX, each with a mute and a volume (Rust app only).
+    /// Electron's "voice" key is kept in step with it.
+    pub sound: crate::sound::Sound,
     /// Where the webcam sits, from "Where's my camera?" (Rust app only).
     pub camera: Option<crate::placement::CameraSpot>,
     /// What you call your blinki, if you've named it (Rust app only).
@@ -61,6 +64,7 @@ impl Default for Prefs {
             theme: None,
             feel: false,
             remember: false,
+            sound: crate::sound::Sound::default(),
         }
     }
 }
@@ -147,6 +151,12 @@ impl Prefs {
         };
         prefs.position = point("position");
         prefs.look_offset = point("lookOffset");
+        // No mixer saved yet: carry the old single Voice toggle over.
+        prefs.sound = saved
+            .get("sound")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_else(|| crate::sound::Sound::from_old_voice(prefs.voice));
         prefs.camera = saved
             .get("camera")
             .cloned()
