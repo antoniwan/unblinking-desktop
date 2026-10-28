@@ -26,6 +26,7 @@ mod eye;
 mod fonts;
 mod mind;
 mod moods;
+mod motion;
 mod placement;
 mod prefs;
 mod senses;
@@ -499,6 +500,8 @@ struct App {
     started: Instant,
     last_frame: Instant,
     mind: Mind,
+    /// The body that carries out the mind's wishes: weight, breath, flinch.
+    motion: motion::Motion,
     mode: Option<Mode>,
     /// The camera thread, while the eye is allowed to see.
     eyes: Option<Eyes>,
@@ -694,9 +697,13 @@ impl App {
         // Opening, the eye grows and fades in with its pupil wide, then the
         // pupil settles to what the mind wants. Closing, it narrows, cools,
         // shrinks and fades to nothing.
+        // The mind's frame, given a body: a gaze with weight and drift, a
+        // restless pupil, breath, and a flinch (see motion.rs).
+        let m = self.motion.update(dt, &s);
+
         let k = self.presence.amount();
         let closing = matches!(self.presence, Presence::Closing(..));
-        let pupil = s.pupil as f32;
+        let pupil = m.pupil;
         let pupil = if closing {
             pupil * k
         } else {
@@ -713,9 +720,9 @@ impl App {
         ];
         let state = EyeState {
             flow: self.flow,
-            gaze: [s.gaze.x as f32, s.gaze.y as f32],
+            gaze: m.gaze,
             pupil,
-            heat: s.heat as f32 * look.heat / 0.55 * cool,
+            heat: m.heat * look.heat / 0.55 * cool,
             flare: s.flare as f32,
             wide: s.wide as f32 * look.wake * cool,
             dim: (s.dim as f32).max(look.dim),
@@ -727,13 +734,13 @@ impl App {
             glow: look.glow,
             embers: look.embers,
             time: (self.started.elapsed().as_secs_f32()) % 3600.0,
-            breath: 0.0,
-            morph: 0.0,
-            gaze_vel: [0.0, 0.0],
-            pupil_vel: 0.0,
-            quality: 1.0,
-            wince: 0.0,
-            roll: 0.0,
+            breath: m.breath,
+            morph: m.morph,
+            gaze_vel: m.gaze_vel,
+            pupil_vel: m.pupil_vel,
+            quality: m.quality,
+            wince: m.wince,
+            roll: m.roll,
         };
         if self.panel.is_some() {
             self.observe(&s, &state, reason, level, window);
@@ -1363,6 +1370,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         started: now,
         last_frame: now,
         mind: Mind::new(say),
+        motion: motion::Motion::new(),
         mode: None,
         eyes: None,
         ears: None,
