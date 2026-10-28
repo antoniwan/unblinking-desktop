@@ -23,6 +23,7 @@ mod camera_picker;
 mod desktop;
 mod egui_window;
 mod eye;
+mod feeling;
 mod fonts;
 mod mind;
 mod moods;
@@ -32,6 +33,7 @@ mod remembrance;
 mod senses;
 mod senses_panel;
 mod session;
+mod themes;
 mod tray;
 mod voice;
 mod whisper;
@@ -986,6 +988,10 @@ impl App {
                 self.prefs.click_through = on;
                 let _ = window.set_cursor_hittest(!on);
             }
+            // For now these only save the choice; the eye picks them up next.
+            Action::Theme(id) => self.prefs.theme = Some(id.to_string()),
+            Action::ReadFace(on) => self.prefs.feel = on,
+            Action::Remember(on) => self.prefs.remember = on,
         }
         if !matches!(
             action,
