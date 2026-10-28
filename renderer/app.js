@@ -2,6 +2,7 @@
 import { createEye } from './eye.js';
 import { Senses } from './senses.js';
 import { Mind } from './mind.js';
+import { createVoice } from './voice.js';
 
 const bridge = window.unblinking;
 const IS_MAC = bridge?.platform === 'darwin';
@@ -11,6 +12,7 @@ const canvas = document.getElementById('eye');
 const whisperEl = document.getElementById('whisper');
 const eye = createEye(canvas);
 const senses = new Senses(document.getElementById('cam'));
+const voice = createVoice();
 
 // The latest of everything the main process tells us. Same keys as the
 // prefs main.js sends; these defaults hold until the first message arrives.
@@ -25,6 +27,7 @@ function say(text, kind) {
   whisperEl.classList.add('show');
   clearTimeout(whisperTimer);
   whisperTimer = setTimeout(() => whisperEl.classList.remove('show'), 3200);
+  if (prefs.voice) voice.say(text);
 }
 
 const mind = new Mind(say);
@@ -50,6 +53,7 @@ bridge?.onWorld((w) => (world = w));
 bridge?.onPrefs((p) => {
   const wasBlind = prefs.blind;
   prefs = { ...prefs, ...p };
+  voice.setEnabled(!!prefs.voice);
   if (!started) return start();
   if (prefs.blind && !wasBlind) setSight(false);
   if (!prefs.blind && wasBlind) setSight(true);
@@ -82,7 +86,9 @@ function frame(now) {
       lookFailed = true;
     }
   }
-  const level = senses.listen();
+  // The mic hears the speakers, so it goes deaf while the eye speaks.
+  const heard = senses.listen();
+  const level = voice.speaking ? 0 : heard;
 
   // s: the mind's state this frame (gaze, pupil, heat, flare, wide, dim, shake, mode).
   const s = mind.update(dt, {
@@ -104,6 +110,7 @@ function frame(now) {
     dim: s.dim,
     center: { x: center.x + s.shake.x, y: center.y + s.shake.y },
   });
+  voice.update(s, dt);
 }
 requestAnimationFrame(frame);
 
@@ -117,5 +124,8 @@ setInterval(() => {
   );
 }, 3000);
 
-// Let go of the camera and mic when the page goes away.
-window.addEventListener('pagehide', () => senses.close());
+// Let go of the camera, the mic, and the speakers when the page goes away.
+window.addEventListener('pagehide', () => {
+  senses.close();
+  voice.dispose();
+});
