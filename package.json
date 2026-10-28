@@ -3,6 +3,7 @@
   "productName": "Unblinking",
   "version": "0.1.0",
   "description": "A burning eye that lives on your desktop and watches you through your camera and microphone.",
+  "license": "MIT",
   "private": true,
   "main": "src/main.js",
   "scripts": {

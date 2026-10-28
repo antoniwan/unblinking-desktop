@@ -62,4 +62,4 @@ How the pieces talk: [docs/architecture.md](docs/architecture.md). Working on it
 
 ## License
 
-None chosen yet, so all rights are reserved for now.
+MIT. See [LICENSE](LICENSE).
