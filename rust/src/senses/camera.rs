@@ -17,6 +17,7 @@ use nokhwa::utils::{
 use image::RgbImage;
 use image::imageops::{self, FilterType};
 
+use super::expression::{Expression, Feeling};
 use super::{Detection, Detector};
 
 /// Face detection is the costly part; 15 times a second is plenty.
@@ -34,6 +35,9 @@ pub struct Sight {
     /// A small copy of the frame, only while Blinki's Senses is open. It is
     /// shown live and dropped; nothing is ever written to disk.
     pub preview: Option<Arc<RgbImage>>,
+    /// How the main face seems to feel, only while the user has turned
+    /// that on (`Eyes::set_feel`). `None` when it is off or there's no face.
+    pub expression: Option<Expression>,
 }
 
 /// The open eyes: a handle on the camera thread.
@@ -45,6 +49,8 @@ pub struct Eyes {
     stop: Arc<AtomicBool>,
     /// Set while Blinki's Senses is open and wants the picture.
     preview: Arc<AtomicBool>,
+    /// Set while the user lets the eye read their expression.
+    feel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     reports: Receiver<Sight>,
     latest: Sight,
@@ -69,16 +75,22 @@ impl Eyes {
         // keeps the Sender, we keep the Receiver.
         let (tx, reports) = mpsc::channel();
         let preview = Arc::new(AtomicBool::new(false));
-        let (flag, want) = (Arc::clone(&stop), Arc::clone(&preview));
+        let feel = Arc::new(AtomicBool::new(false));
+        let flags = Flags {
+            stop: Arc::clone(&stop),
+            preview: Arc::clone(&preview),
+            feel: Arc::clone(&feel),
+        };
         // `move` hands the closure ownership of what it uses (the detector,
         // the flags, the sender), so they travel to the new thread with it.
         let thread = thread::Builder::new()
             .name("camera".into())
-            .spawn(move || watch(make, flag, want, tx))
+            .spawn(move || watch(make, flags, tx))
             .expect("spawn camera thread");
         Eyes {
             stop,
             preview,
+            feel,
             thread: Some(thread),
             reports,
             latest: Sight::default(),
@@ -101,6 +113,23 @@ impl Eyes {
             self.latest.preview = None;
         }
     }
+
+    /// Lets the camera thread read the main face's expression, or stops it.
+    /// Off by default. Turning it off also forgets everything it learned
+    /// about the face (on the camera thread, with the next frame).
+    pub fn set_feel(&mut self, on: bool) {
+        self.feel.store(on, Ordering::Relaxed);
+        if !on {
+            self.latest.expression = None;
+        }
+    }
+}
+
+/// The flags the window shares with the camera thread.
+struct Flags {
+    stop: Arc<AtomicBool>,
+    preview: Arc<AtomicBool>,
+    feel: Arc<AtomicBool>,
 }
 
 /// `Drop` is Rust's destructor: it runs when a value goes away (goes out of
@@ -128,7 +157,7 @@ pub(super) fn open_camera() -> Result<Camera, nokhwa::NokhwaError> {
 }
 
 /// The camera thread's whole life.
-fn watch<F>(make: F, stop: Arc<AtomicBool>, preview: Arc<AtomicBool>, tx: Sender<Sight>)
+fn watch<F>(make: F, flags: Flags, tx: Sender<Sight>)
 where
     F: FnOnce() -> Result<Box<dyn Detector>, String>,
 {
@@ -162,6 +191,13 @@ where
         ..Sight::default()
     });
 
+    let Flags {
+        stop,
+        preview,
+        feel,
+    } = flags;
+    // Only exists while the user has said yes; see `sense_feeling`.
+    let mut feeling: Option<Feeling> = None;
     let mut last_look: Option<Instant> = None;
     while !stop.load(Ordering::Relaxed) {
         // Waits for the next frame. Reading every frame keeps the camera's
@@ -185,6 +221,14 @@ where
             }
         };
         let detections = detector.detect(&rgb);
+        let expression = sense_feeling(
+            feel.load(Ordering::Relaxed),
+            &mut feeling,
+            Feeling::with_model,
+            &rgb,
+            &detections,
+            Instant::now(),
+        );
         let preview = preview.load(Ordering::Relaxed).then(|| {
             let h = rgb.height() * PREVIEW_WIDTH / rgb.width().max(1);
             Arc::new(imageops::resize(
@@ -200,6 +244,7 @@ where
                 detections,
                 can_see: true,
                 preview,
+                expression,
             })
             .is_err()
         {
@@ -208,6 +253,27 @@ where
     }
     let _ = camera.stop_stream();
     let _ = tx.send(Sight::default());
+}
+
+/// Reads the main face's expression, only while `on`. The Feeling is made
+/// (with `make`) the first time it is needed, so its model is never loaded
+/// for someone who never turns this on. Turning it off drops the Feeling,
+/// and with it everything it learned about the face.
+fn sense_feeling(
+    on: bool,
+    feeling: &mut Option<Feeling>,
+    make: impl FnOnce() -> Feeling,
+    frame: &RgbImage,
+    detections: &[Detection],
+    now: Instant,
+) -> Option<Expression> {
+    if !on {
+        *feeling = None;
+        return None;
+    }
+    feeling
+        .get_or_insert_with(make)
+        .feel(frame, detections, now)
 }
 
 #[cfg(test)]
@@ -239,5 +305,48 @@ mod tests {
         eprintln!("looked at {} frames of {:?}", seen.len(), seen.first());
         // About 15 looks a second, after the camera warms up.
         assert!(seen.len() >= 10, "only {} frames", seen.len());
+    }
+
+    /// A face straight on, as YuNet would report it.
+    fn face() -> Detection {
+        Detection {
+            face: crate::mind::Face {
+                x: 0.5,
+                y: 0.4,
+                size: 0.2,
+                score: 0.9,
+                aspect: 1.0,
+            },
+            bbox: [0.4, 0.3, 0.2, 0.26],
+            landmarks: [
+                [0.45, 0.4],
+                [0.55, 0.4],
+                [0.5, 0.457],
+                [0.458, 0.516],
+                [0.542, 0.516],
+            ],
+        }
+    }
+
+    #[test]
+    fn feeling_only_while_allowed() {
+        let frame = RgbImage::new(1, 1);
+        let mut feeling = None;
+        let mut t = Instant::now();
+        let mut sense = |on: bool, faces: &[Detection], feeling: &mut Option<Feeling>| {
+            t += Duration::from_millis(66);
+            sense_feeling(on, feeling, || Feeling::new(None), &frame, faces, t)
+        };
+        // Off: nothing read, nothing made.
+        assert_eq!(sense(false, &[face()], &mut feeling), None);
+        assert!(feeling.is_none());
+        // On: a reading, and a Feeling learning the face.
+        assert!(sense(true, &[face()], &mut feeling).is_some());
+        assert!(feeling.is_some());
+        // On, but nobody there.
+        assert_eq!(sense(true, &[], &mut feeling), None);
+        // Off again: no reading, and what it learned is gone.
+        assert_eq!(sense(false, &[face()], &mut feeling), None);
+        assert!(feeling.is_none());
     }
 }

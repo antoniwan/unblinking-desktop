@@ -1,9 +1,12 @@
 //! Sight (and, later, hearing): the Rust side of renderer/senses.js.
 //! Camera frames go to a face detector running locally. Nothing is
 //! recorded, stored, or sent anywhere; each frame is dropped once looked at.
+//! Reading the face's expression (`expression`) is off unless the user turns
+//! it on, and follows the same rules.
 
 pub mod camera;
 pub mod face;
+pub mod expression;
 pub mod mic;
 
 use image::RgbImage;
