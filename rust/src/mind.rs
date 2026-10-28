@@ -40,6 +40,8 @@ pub enum Line {
     Long,
     NoSight,
     Unblind,
+    /// Someone said the wake word.
+    Called,
 }
 
 impl Line {
@@ -61,6 +63,7 @@ impl Line {
             Line::Long => &["Still watching.", "I have not looked away."],
             Line::NoSight => &["I cannot see you. Yet."],
             Line::Unblind => &["I see again."],
+            Line::Called => &["You called?", "I am here.", "Speak, and I listen."],
         }
     }
 }
@@ -327,6 +330,25 @@ impl Mind {
         let texts = kind.texts();
         let text = texts[self.rng.usize(..texts.len())];
         (self.say)(text, kind);
+    }
+
+    /// Someone said "Hey, OG Blinki": a strong noticing, like a face that
+    /// just came back. It flares, narrows its pupil, looks straight out at
+    /// you (or keeps the face it already has) and answers. The answer
+    /// skips the usual pause between whispers: being called deserves one.
+    pub fn called(&mut self) {
+        self.flare = self.flare.max(0.8);
+        self.pupil = self.pupil.min(0.2);
+        if self.face.is_none() {
+            // Straight out of the screen is where you sit. Hold it a few
+            // seconds before darting about again, and let the cursor go.
+            self.target = Vec2::default();
+            self.gaze_rate = 14.0;
+            self.next_saccade = self.t + 3.0;
+            self.cursor_moved_at = f64::NEG_INFINITY;
+        }
+        self.last_whisper = f64::NEG_INFINITY;
+        self.whisper(Line::Called, 4.0);
     }
 
     /// Where your eyes are in the room, then the gaze that points the pupil
@@ -986,6 +1008,18 @@ mod tests {
         };
         run(&mut m, 2.0, &quiet);
         assert!(said.borrow().is_empty());
+    }
+
+    #[test]
+    fn answers_when_called_even_right_after_a_whisper() {
+        let (mut m, said) = mind();
+        run(&mut m, 1.0, &senses(&[face(0.5, 0.5)])); // "I see you."
+        m.called();
+        assert_eq!(kinds(&said), [Line::First, Line::Called]);
+        let f = m.update(DT, &senses(&[face(0.5, 0.5)]));
+        assert!(f.flare > 0.7, "it flares, got {}", f.flare);
+        m.called();
+        assert_eq!(said.borrow().len(), 2, "not twice in a row");
     }
 
     #[test]

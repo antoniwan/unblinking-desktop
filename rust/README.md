@@ -16,6 +16,16 @@ Done so far:
   exe, and frames stay in memory only.
 - Hearing. The default mic, reduced to one loudness number (cpal), feeds the
   flames and makes the eye flinch at a bang.
+- The wake word (opt-in, off by default). Tick "Wake on 'Hey, OG Blinki'"
+  in the tray, then say "Hey, OG Blinki" or "Hey Blinki": the eye appears
+  if hidden, looks at you, and answers. It uses Windows' own speech
+  recognizer with a fixed list of phrases, which runs on the computer with
+  the installed speech language pack: no cloud, no account, no key, nothing
+  recorded. Blinding the eye stops it too. It needs a speech language
+  installed (Settings > Time & language > Speech, and Language & region)
+  and the mic allowed for desktop apps (Settings > Privacy & security >
+  Microphone). If it can't start, it unticks itself and says "I can't hear
+  names on this computer yet."
 - The tray icon and its menu, which also opens when you right-click the eye:
   show or hide, blind (camera and mic really stop), whispers, voice (saved
   only for now), click-through, and banish.
@@ -147,6 +157,7 @@ as a fallback.
 | `src/desktop.rs` | The cursor position and work area, read from Windows |
 | `src/senses/camera.rs` | The camera thread and the channel that brings its reports back |
 | `src/senses/mic.rs` | The mic stream and its loudness, shared through an atomic |
+| `src/senses/wake.rs` | The wake word: Windows' speech recognizer on its own thread, and the phrase matcher |
 | `src/prefs.rs` | Loading and saving prefs.json |
 | `src/tray.rs` | The tray icon, the menu, and the right-click popup |
 | `src/senses/face.rs` | YuNet through tract, and the box decoding and NMS that MediaPipe used to do |

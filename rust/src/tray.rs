@@ -18,6 +18,8 @@ pub enum Action {
     Whispers(bool),
     Voice(bool),
     ClickThrough(bool),
+    /// Listen for "Hey, OG Blinki".
+    WakeWord(bool),
     /// Take where you sit now as dead centre.
     LookAtMe,
     /// Open or close Blinki's Senses.
@@ -40,6 +42,7 @@ pub struct Tray {
     whispers: CheckMenuItem,
     voice: CheckMenuItem,
     click_through: CheckMenuItem,
+    wake_word: CheckMenuItem,
     look_at_me: MenuItem,
     senses: MenuItem,
     where_camera: MenuItem,
@@ -57,6 +60,7 @@ impl Tray {
         let voice = CheckMenuItem::new("Voice", true, prefs.voice, None);
         let click_through =
             CheckMenuItem::new("Let clicks pass through", true, prefs.click_through, None);
+        let wake_word = CheckMenuItem::new("Wake on 'Hey, OG Blinki'", true, prefs.wake_word, None);
         let look_at_me = MenuItem::new("Look at me (sit as usual, then click)", true, None);
         let senses = MenuItem::new("Blinki's Senses  (Ctrl+Alt+B)", true, None);
         let where_camera = MenuItem::new("Where's my camera?", true, None);
@@ -82,6 +86,7 @@ impl Tray {
         menu.append(&whispers)?;
         menu.append(&voice)?;
         menu.append(&click_through)?;
+        menu.append(&wake_word)?;
         menu.append(&autostart)?;
         menu.append(&hide_fullscreen)?;
         menu.append(&where_camera)?;
@@ -108,6 +113,7 @@ impl Tray {
             whispers,
             voice,
             click_through,
+            wake_word,
             look_at_me,
             senses,
             where_camera,
@@ -136,6 +142,8 @@ impl Tray {
                 Action::Voice(self.voice.is_checked())
             } else if id == self.click_through.id() {
                 Action::ClickThrough(self.click_through.is_checked())
+            } else if id == self.wake_word.id() {
+                Action::WakeWord(self.wake_word.is_checked())
             } else if id == self.autostart.id() {
                 Action::StartWithComputer(self.autostart.is_checked())
             } else if id == self.hide_fullscreen.id() {
@@ -184,6 +192,7 @@ impl Tray {
         self.voice.set_checked(prefs.voice);
         self.click_through.set_checked(prefs.click_through);
         self.hide_fullscreen.set_checked(prefs.hide_fullscreen);
+        self.wake_word.set_checked(prefs.wake_word);
         let tip = if prefs.blind {
             "Unblinking: blinded"
         } else {

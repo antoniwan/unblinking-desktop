@@ -35,6 +35,8 @@ pub struct Prefs {
     /// Get out of the way of full-screen games, videos and presentations
     /// (Rust app only). On by default.
     pub hide_fullscreen: bool,
+    /// Listen for "Hey, OG Blinki" (Rust app only). Off by default.
+    pub wake_word: bool,
 }
 
 impl Default for Prefs {
@@ -48,6 +50,7 @@ impl Default for Prefs {
             look_offset: None,
             camera: None,
             hide_fullscreen: true,
+            wake_word: false,
         }
     }
 }
@@ -104,6 +107,9 @@ impl Prefs {
         }
         if let Some(v) = flag("hideFullscreen") {
             prefs.hide_fullscreen = v;
+        }
+        if let Some(v) = flag("wakeWord") {
+            prefs.wake_word = v;
         }
         // Deserialize just these fields; a malformed one is dropped.
         let point = |key: &str| {
@@ -178,6 +184,7 @@ mod tests {
         };
         let text = serde_json::to_string(&p).unwrap();
         assert!(text.contains("\"clickThrough\":true"), "{text}");
+        assert!(text.contains("\"wakeWord\":false"), "{text}");
         assert_eq!(Prefs::from_json(&text), p);
     }
 
@@ -241,6 +248,7 @@ mod tests {
                 offset: 0.7,
             }),
             hide_fullscreen: false,
+            wake_word: true,
         };
         let text = serde_json::to_string_pretty(&p).unwrap();
         assert_eq!(Prefs::from_json(&text), p);
