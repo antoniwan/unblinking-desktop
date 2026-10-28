@@ -32,6 +32,9 @@ pub struct Prefs {
     pub look_offset: Option<Position>,
     /// Where the webcam sits, from "Where's my camera?" (Rust app only).
     pub camera: Option<crate::placement::CameraSpot>,
+    /// Get out of the way of full-screen games, videos and presentations
+    /// (Rust app only). On by default.
+    pub hide_fullscreen: bool,
 }
 
 impl Default for Prefs {
@@ -44,6 +47,7 @@ impl Default for Prefs {
             position: None,
             look_offset: None,
             camera: None,
+            hide_fullscreen: true,
         }
     }
 }
@@ -97,6 +101,9 @@ impl Prefs {
         }
         if let Some(v) = flag("voice") {
             prefs.voice = v;
+        }
+        if let Some(v) = flag("hideFullscreen") {
+            prefs.hide_fullscreen = v;
         }
         // Deserialize just these fields; a malformed one is dropped.
         let point = |key: &str| {
@@ -172,5 +179,20 @@ mod tests {
         let text = serde_json::to_string(&p).unwrap();
         assert!(text.contains("\"clickThrough\":true"), "{text}");
         assert_eq!(Prefs::from_json(&text), p);
+    }
+
+    #[test]
+    fn hide_fullscreen_defaults_on() {
+        assert!(
+            Prefs::from_json("{}").hide_fullscreen,
+            "missing key means on"
+        );
+        let off = Prefs {
+            hide_fullscreen: false,
+            ..Prefs::default()
+        };
+        let text = serde_json::to_string(&off).unwrap();
+        assert!(text.contains("\"hideFullscreen\":false"), "{text}");
+        assert!(!Prefs::from_json(&text).hide_fullscreen);
     }
 }

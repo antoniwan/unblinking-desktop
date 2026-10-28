@@ -24,6 +24,7 @@ mod desktop;
 mod egui_window;
 mod eye;
 mod fonts;
+mod fullscreen;
 mod mind;
 mod moods;
 mod placement;
@@ -42,7 +43,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use desktop::{Point, Rect};
@@ -544,6 +545,8 @@ struct App {
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
     _hotkeys: Option<GlobalHotKeyManager>,
+    /// Hides the eye during full-screen games, and the pout after.
+    fullscreen: fullscreen::Watcher,
 }
 
 impl App {
@@ -685,6 +688,10 @@ impl App {
             .mood
             .as_deref()
             .map(|m| (m, "held by --mood"))
+            .or_else(|| {
+                let sulk = self.fullscreen.sulk().filter(|_| !self.prefs.blind);
+                sulk.map(|m| (m, "sulking after a full-screen app"))
+            })
             .unwrap_or_else(|| self.choose_mood(&s, &faces));
         let (mood, reason) = mood;
         self.moods.set(mood);
@@ -958,6 +965,7 @@ impl App {
                 self.set_senses(!on);
             }
             Action::Whispers(on) => self.prefs.whispers = on,
+            Action::HideFullscreen(on) => self.prefs.hide_fullscreen = on,
             Action::Voice(on) => {
                 self.prefs.voice = on;
                 self.voice.set_enabled(on);
@@ -1188,6 +1196,16 @@ impl ApplicationHandler for App {
                     gpu.whispers
                         .show(&text, School::of_mood(&self.moods.current().name));
                 }
+                // Back from a full-screen app: one jealous line, once it's open.
+                if self.presence == Presence::Open
+                    && let Some(text) = self.fullscreen.take_line()
+                    && self.prefs.whispers
+                    && !self.prefs.blind
+                {
+                    gpu.whispers
+                        .show(text, School::of_mood(&self.moods.current().name));
+                    self.voice.say(text);
+                }
                 gpu.render(&state);
                 // The camera picker too, saving each move as it's made.
                 if let Some(picker) = &mut self.picker {
@@ -1236,6 +1254,24 @@ impl ApplicationHandler for App {
         if self.instance.as_ref().is_some_and(|i| i.woken()) && !self.presence.shown() {
             self.appear();
         }
+        // Full screen: step aside (hiding, not quitting, and no pref saved),
+        // then come back once it's over. The watcher itself asks Windows
+        // only about once a second.
+        match self
+            .fullscreen
+            .tick(self.prefs.hide_fullscreen, self.presence.shown())
+        {
+            Some(fullscreen::Do::Hide) => self.close(AfterClose::Hide, event_loop),
+            Some(fullscreen::Do::Return) => self.appear(),
+            None => {}
+        }
+        // A hidden window gets no redraws, so wake at least once a second
+        // anyway; otherwise nothing would notice the game has ended.
+        event_loop.set_control_flow(if self.presence == Presence::Hidden {
+            ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1))
+        } else {
+            ControlFlow::Wait
+        });
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == HotKeyState::Pressed {
                 self.toggle_senses(event_loop);
@@ -1386,6 +1422,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         pending_whisper: None,
         _hotkeys: hotkeys,
         instance,
+        fullscreen: fullscreen::Watcher::new(),
     };
     app.voice.set_enabled(app.prefs.voice);
     event_loop.run_app(&mut app)?;

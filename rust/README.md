@@ -34,6 +34,10 @@ Done so far:
   "Look at me" fine-tunes it.
 - One copy at a time: launching it again wakes the eye. "Start with the
   computer" in the tray adds it to Windows' per-user startup list.
+- Full-screen jealousy. During a full-screen game, video or presentation the
+  eye fades out of the way, and comes back sulking once it's over, with a
+  jealous whisper. "Hide during full-screen games" in the tray turns it off
+  (`src/fullscreen.rs`).
 - Opening and closing. The eye eases open over 0.9 s, and fades out over
   0.6 s before it hides or quits. The window only shows after a transparent
   first frame, so there's no black box.

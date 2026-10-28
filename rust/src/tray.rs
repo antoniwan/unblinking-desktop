@@ -25,6 +25,8 @@ pub enum Action {
     /// Open or close "Where's my camera?".
     WhereCamera,
     StartWithComputer(bool),
+    /// Hide during full-screen games, videos and presentations.
+    HideFullscreen(bool),
     Quit,
 }
 
@@ -42,6 +44,7 @@ pub struct Tray {
     senses: MenuItem,
     where_camera: MenuItem,
     autostart: CheckMenuItem,
+    hide_fullscreen: CheckMenuItem,
     quit: MenuItem,
 }
 
@@ -63,6 +66,12 @@ impl Tray {
             crate::session::starts_with_computer(),
             None,
         );
+        let hide_fullscreen = CheckMenuItem::new(
+            "Hide during full-screen games",
+            true,
+            prefs.hide_fullscreen,
+            None,
+        );
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
@@ -74,6 +83,7 @@ impl Tray {
         menu.append(&voice)?;
         menu.append(&click_through)?;
         menu.append(&autostart)?;
+        menu.append(&hide_fullscreen)?;
         menu.append(&where_camera)?;
         menu.append(&look_at_me)?;
         menu.append(&senses)?;
@@ -102,6 +112,7 @@ impl Tray {
             senses,
             where_camera,
             autostart,
+            hide_fullscreen,
             quit,
         };
         tray.refresh(prefs, true);
@@ -127,6 +138,8 @@ impl Tray {
                 Action::ClickThrough(self.click_through.is_checked())
             } else if id == self.autostart.id() {
                 Action::StartWithComputer(self.autostart.is_checked())
+            } else if id == self.hide_fullscreen.id() {
+                Action::HideFullscreen(self.hide_fullscreen.is_checked())
             } else if id == self.where_camera.id() {
                 Action::WhereCamera
             } else if id == self.senses.id() {
@@ -170,6 +183,7 @@ impl Tray {
         self.whispers.set_checked(prefs.whispers);
         self.voice.set_checked(prefs.voice);
         self.click_through.set_checked(prefs.click_through);
+        self.hide_fullscreen.set_checked(prefs.hide_fullscreen);
         let tip = if prefs.blind {
             "Unblinking: blinded"
         } else {
