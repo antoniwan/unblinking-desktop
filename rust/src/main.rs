@@ -613,6 +613,7 @@ impl App {
             Some(eyes) => {
                 let sight = eyes.look();
                 let faces: Vec<_> = sight.detections.iter().map(|d| d.face).collect();
+                self.expression = sight.expression;
                 (faces, sight.can_see)
             }
             None => (vec![], false),
@@ -951,6 +952,7 @@ impl App {
         if !open {
             self.eyes = None;
             self.ears = None;
+            self.expression = None;
             eprintln!("senses closed");
             return;
         }
@@ -959,6 +961,9 @@ impl App {
                 let net = YuNet::new().map_err(|e| e.to_string())?;
                 Ok(Box::new(net) as Box<dyn Detector>)
             }));
+            if let Some(eyes) = &mut self.eyes {
+                eyes.set_feel(self.prefs.feel);
+            }
         }
         if self.ears.is_none() {
             // `.map_err(..).ok()` logs a failure and carries on deaf:
@@ -1023,7 +1028,15 @@ impl App {
                 self.prefs.theme = Some(id.to_string());
                 self.moods.set_theme(id);
             }
-            Action::ReadFace(on) => self.prefs.feel = on,
+            Action::ReadFace(on) => {
+                self.prefs.feel = on;
+                if let Some(eyes) = &mut self.eyes {
+                    eyes.set_feel(on);
+                }
+                if !on {
+                    self.expression = None;
+                }
+            }
             Action::Forget => {
                 // Wipes the file. If it's still remembering, it starts afresh.
                 let now = remembrance::unix_now();

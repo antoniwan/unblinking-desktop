@@ -37,8 +37,6 @@ pub struct Sight {
     pub preview: Option<Arc<RgbImage>>,
     /// How the main face seems to feel, only while the user has turned
     /// that on (`Eyes::set_feel`). `None` when it is off or there's no face.
-    // Allowed to go unread until the window reads it.
-    #[allow(dead_code)]
     pub expression: Option<Expression>,
 }
 
@@ -119,8 +117,6 @@ impl Eyes {
     /// Lets the camera thread read the main face's expression, or stops it.
     /// Off by default. Turning it off also forgets everything it learned
     /// about the face (on the camera thread, with the next frame).
-    // Allowed to go unused until the window calls it.
-    #[allow(dead_code)]
     pub fn set_feel(&mut self, on: bool) {
         self.feel.store(on, Ordering::Relaxed);
         if !on {
