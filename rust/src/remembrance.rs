@@ -27,7 +27,6 @@
 // The app wires this module in a step after this one (main.rs and the
 // tray are owned elsewhere), so for now most of this public API is unused
 // by the binary and only exercised by the tests. Remove once it's wired.
-#![allow(dead_code, reason = "public API not wired into main.rs yet")]
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -605,6 +604,7 @@ impl Remembrance {
     }
 
     /// When the blinki first met you, unix seconds.
+    #[allow(dead_code)] // for a "together since" line later
     pub fn born(&self) -> u64 {
         self.born
     }

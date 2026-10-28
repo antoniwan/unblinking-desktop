@@ -24,6 +24,7 @@ use crate::desktop::{Point, Rect as DRect};
 use crate::egui_window::EguiWindow;
 use crate::mind::{BANG_LEVEL, Frame, Insight, Line, Mode, Vec2};
 use crate::senses::Detection;
+use crate::senses::expression::Expression;
 
 /// How many loudness samples the Hearing lens keeps (about 8 s at 60 fps).
 pub const LEVEL_HISTORY: usize = 480;
@@ -57,6 +58,12 @@ pub struct Snapshot {
     pub clock: (u32, u32),
     /// Where the webcam is set to be, in words.
     pub camera: String,
+    /// What it remembers of you, while "Remember our days" is on: its
+    /// traits for you, in words, and the newest first in its journal.
+    /// Never numbers: Remembrance is felt, not scored.
+    pub remembers: Option<(Vec<&'static str>, Option<String>)>,
+    /// The reading of your face, while "Read my face" is on.
+    pub expression: Option<Expression>,
 }
 
 pub struct SensesPanel {
@@ -561,7 +568,56 @@ fn mind_lens(p: &egui::Painter, r: Rect, snap: &Snapshot, ink: &Ink) {
         FontId::proportional(12.0),
         ink.faint,
     );
-    y += 26.0;
+    y += 18.0;
+
+    // What it reads in your face, and what it remembers of you, in words.
+    if let Some(e) = &snap.expression {
+        let face = if e.confidence < 0.5 {
+            "hard to read"
+        } else if e.facing < 0.35 {
+            "turned away"
+        } else if e.smile > 0.6 {
+            "smiling"
+        } else if e.surprise > 0.6 {
+            "surprised"
+        } else {
+            "calm"
+        };
+        p.text(
+            Pos2::new(r.min.x, y),
+            Align2::LEFT_TOP,
+            format!("your face: {face}"),
+            FontId::proportional(12.0),
+            ink.faint,
+        );
+        y += 16.0;
+    }
+    if let Some((traits, first)) = &snap.remembers {
+        let known = if traits.is_empty() {
+            "still getting to know you".to_string()
+        } else {
+            format!("knows you as {}", traits.join(", "))
+        };
+        p.text(
+            Pos2::new(r.min.x, y),
+            Align2::LEFT_TOP,
+            known,
+            FontId::proportional(12.0),
+            ink.faint,
+        );
+        y += 16.0;
+        if let Some(line) = first {
+            p.text(
+                Pos2::new(r.min.x, y),
+                Align2::LEFT_TOP,
+                format!("remembers: “{line}”"),
+                FontId::proportional(12.0),
+                ink.faint,
+            );
+            y += 16.0;
+        }
+    }
+    y += 8.0;
 
     // The live numbers.
     let rows = [

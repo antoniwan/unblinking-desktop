@@ -18,9 +18,6 @@
 //! test. `Feeling` wraps it with a little memory (how long you've smiled,
 //! how long the mood has been showing) so the eye doesn't flicker.
 
-// Until main.rs calls `Feeling::update` and `tint`, the compiler would warn
-// that they're unused outside the tests. Remove this line once it does.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::mind::{Line, Mode};
 use crate::moods::Look;

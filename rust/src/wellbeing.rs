@@ -29,7 +29,6 @@
 //!   little calm, the way a late night does; it's never a mark against you.
 
 // Not called from main.rs yet; it gets wired in a step after this one.
-#![allow(dead_code, reason = "not wired into main.rs yet")]
 
 use std::ops::Range;
 

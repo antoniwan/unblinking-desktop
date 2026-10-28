@@ -33,6 +33,8 @@ pub enum Action {
     ReadFace(bool),
     /// "Remember our days": keep the Remembrance ledger on this computer.
     Remember(bool),
+    /// "Forget our days": wipe the Remembrance ledger from this computer.
+    Forget,
     Quit,
 }
 
@@ -65,6 +67,7 @@ pub struct Tray {
     themes: Vec<(&'static str, CheckMenuItem)>,
     read_face: CheckMenuItem,
     remember: CheckMenuItem,
+    forget: MenuItem,
     quit: MenuItem,
 }
 
@@ -108,6 +111,7 @@ impl Tray {
             prefs.remember,
             None,
         );
+        let forget = MenuItem::new("Forget our days", true, None);
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
@@ -123,6 +127,7 @@ impl Tray {
         menu.append(&theme_menu)?;
         menu.append(&read_face)?;
         menu.append(&remember)?;
+        menu.append(&forget)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&where_camera)?;
         menu.append(&look_at_me)?;
@@ -155,6 +160,7 @@ impl Tray {
             themes,
             read_face,
             remember,
+            forget,
             quit,
         };
         tray.refresh(prefs, true);
@@ -184,6 +190,8 @@ impl Tray {
                 Action::ReadFace(self.read_face.is_checked())
             } else if id == self.remember.id() {
                 Action::Remember(self.remember.is_checked())
+            } else if id == self.forget.id() {
+                Action::Forget
             } else if let Some((theme, _)) = self.themes.iter().find(|(_, item)| id == item.id()) {
                 Action::Theme(theme)
             } else if id == self.where_camera.id() {

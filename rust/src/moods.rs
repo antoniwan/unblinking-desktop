@@ -118,6 +118,7 @@ pub struct Moods {
 
 impl Moods {
     /// The default theme's moods (The Burning Eye), starting Watchful.
+    #[cfg(test)]
     pub fn load() -> Moods {
         Moods::of_theme(None)
     }
