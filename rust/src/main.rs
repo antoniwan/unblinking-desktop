@@ -28,6 +28,7 @@ mod mind;
 mod moods;
 mod placement;
 mod prefs;
+mod remembrance;
 mod senses;
 mod senses_panel;
 mod session;
