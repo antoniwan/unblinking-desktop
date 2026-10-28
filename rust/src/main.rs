@@ -27,6 +27,7 @@ mod fonts;
 mod fullscreen;
 mod mind;
 mod moods;
+mod pacing;
 mod placement;
 mod prefs;
 mod senses;
@@ -499,6 +500,10 @@ struct App {
     gpu: Option<Gpu>,
     started: Instant,
     last_frame: Instant,
+    /// When the next frame is due (see pacing.rs), and frames drawn since
+    /// the last heartbeat line, to print the frame rate.
+    next_frame: Instant,
+    frames: u32,
     mind: Mind,
     mode: Option<Mode>,
     /// The camera thread, while the eye is allowed to see.
@@ -624,7 +629,10 @@ impl App {
         );
 
         // Debug heartbeat in the terminal, as app.js had: what it sees.
+        self.frames += 1;
         if self.last_beat.elapsed() >= Duration::from_secs(3) {
+            let fps = self.frames as f64 / self.last_beat.elapsed().as_secs_f64();
+            self.frames = 0;
             self.last_beat = now;
             for (i, f) in faces.iter().enumerate().skip(1) {
                 eprintln!(
@@ -643,7 +651,7 @@ impl App {
                 .unwrap_or_default();
             let level = self.ears.as_ref().map(Ears::level);
             eprintln!(
-                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?} gaze=({:.2},{:.2})",
+                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?} gaze=({:.2},{:.2}) fps={fps:.0}",
                 s.mode,
                 self.moods.current().name,
                 faces.len(),
@@ -1052,6 +1060,52 @@ impl App {
         }
     }
 
+    /// Draws a frame if one is due, and tells winit when to wake next.
+    fn pace(&mut self, event_loop: &ActiveEventLoop) {
+        let hidden = self.presence == Presence::Hidden;
+        // Look at faces less often while nobody can see the eye react.
+        if let Some(eyes) = &self.eyes {
+            eyes.set_resting(hidden);
+        }
+        let no_face_for = self
+            .last_face
+            .map_or(self.started.elapsed(), |t| t.elapsed());
+        let p = pacing::Pacing {
+            shown: self.presence.shown(),
+            fading: matches!(self.presence, Presence::Opening(_) | Presence::Closing(..)),
+            blind: self.prefs.blind,
+            calm: self.mode == Some(Mode::Hunting)
+                && no_face_for >= pacing::CALM_AFTER
+                && self.last_noise.elapsed() >= pacing::CALM_AFTER,
+            egui_open: self.panel.is_some() || self.picker.is_some(),
+        };
+        let now = Instant::now();
+        let Some(interval) = pacing::frame_interval(p) else {
+            // Nothing to draw. Take in the camera's reports so they don't
+            // pile up in the channel, and tick slowly for the tray's sake.
+            if let Some(eyes) = &mut self.eyes {
+                eyes.look();
+            }
+            self.next_frame = now;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + pacing::HIDDEN_TICK));
+            return;
+        };
+        if now >= self.next_frame {
+            self.next_frame = pacing::next_due(self.next_frame, now, interval);
+            if let Some(gpu) = &self.gpu {
+                if hidden {
+                    // A hidden window gets no redraw events from Windows,
+                    // so hand ourselves one (it draws the egui windows only).
+                    let id = gpu.window.id();
+                    self.window_event(event_loop, id, WindowEvent::RedrawRequested);
+                } else {
+                    gpu.window.request_redraw();
+                }
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+
     fn snap(&self, gpu: &mut Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
         let size = gpu.size();
         let scale = gpu.window.scale_factor() as f32;
@@ -1207,7 +1261,10 @@ impl ApplicationHandler for App {
                         .show(text, School::of_mood(&self.moods.current().name));
                     self.voice.say(text);
                 }
-                gpu.render(&state);
+                // While hidden (still drawing for the egui windows), skip the eye.
+                if self.presence != Presence::Hidden {
+                    gpu.render(&state);
+                }
                 // The camera picker too, saving each move as it's made.
                 if let Some(picker) = &mut self.picker {
                     let colors = self.moods.now().display_colors();
@@ -1243,8 +1300,8 @@ impl ApplicationHandler for App {
         }
     }
 
-    /// After each batch of events: ask for the next frame. With vsync on,
-    /// presenting blocks until the screen is ready, which paces the loop.
+    /// After each batch of events: poll the tray and friends, then decide
+    /// when the next frame is due and sleep until then (see pacing.rs).
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // `map_or_else(Vec::new, ..)`: no tray, no clicks.
         let actions = self.tray.as_ref().map_or_else(Vec::new, Tray::poll);
@@ -1266,13 +1323,6 @@ impl ApplicationHandler for App {
             Some(fullscreen::Do::Return) => self.appear(),
             None => {}
         }
-        // A hidden window gets no redraws, so wake at least once a second
-        // anyway; otherwise nothing would notice the game has ended.
-        event_loop.set_control_flow(if self.presence == Presence::Hidden {
-            ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1))
-        } else {
-            ControlFlow::Wait
-        });
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == HotKeyState::Pressed {
                 self.toggle_senses(event_loop);
@@ -1291,9 +1341,7 @@ impl ApplicationHandler for App {
                 self.prefs.save();
             }
         }
-        if let Some(gpu) = &self.gpu {
-            gpu.window.request_redraw();
-        }
+        self.pace(event_loop);
     }
 }
 
@@ -1391,6 +1439,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         gpu: None,
         started: now,
         last_frame: now,
+        next_frame: now,
+        frames: 0,
         mind: Mind::new(say),
         mode: None,
         eyes: None,
