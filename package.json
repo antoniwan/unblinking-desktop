@@ -2,7 +2,7 @@
   "name": "unblinking",
   "productName": "Unblinking",
   "version": "0.1.0",
-  "description": "A burning eye that lives on your desktop and watches you through your camera and microphone.",
+  "description": "A living desktop companion: a blinki that lives on your screen, sees you through your camera, hears you through your mic, and reacts.",
   "license": "MIT",
   "private": true,
   "main": "src/main.js",
