@@ -36,7 +36,10 @@ pub fn cursor() -> Option<Point> {
     // Win32 function writing through a pointer. `.ok()?` turns its
     // `Result` into an `Option` and returns `None` early on failure.
     unsafe { GetCursorPos(&mut p) }.ok()?;
-    Some(Point { x: p.x as f64, y: p.y as f64 })
+    Some(Point {
+        x: p.x as f64,
+        y: p.y as f64,
+    })
 }
 
 /// The primary monitor's work area: the screen minus the taskbar.

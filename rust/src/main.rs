@@ -13,6 +13,7 @@
 // Each `mod` line pulls in a file of the same name from src/.
 mod desktop;
 mod eye;
+mod mind;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -24,7 +25,9 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
+use desktop::{Point, Rect};
 use eye::{Eye, EyeState};
+use mind::{Mind, Mode, Senses, World};
 
 /// Window size in logical pixels (scaled by the monitor's DPI), as in main.js.
 const WIN_SIZE: f64 = 320.0;
@@ -49,7 +52,10 @@ struct Args {
 
 impl Args {
     fn parse() -> Self {
-        let mut args = Args { snap: None, backend: None };
+        let mut args = Args {
+            snap: None,
+            backend: None,
+        };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
             if let Some(ms) = arg.strip_prefix("--snap=") {
@@ -122,13 +128,20 @@ impl Gpu {
 
         let caps = surface.get_capabilities(&adapter);
         // Prefer a compositor that understands our premultiplied pixels.
-        let alpha_mode = [wgpu::CompositeAlphaMode::PreMultiplied, wgpu::CompositeAlphaMode::PostMultiplied]
-            .into_iter()
-            .find(|m| caps.alpha_modes.contains(m));
+        let alpha_mode = [
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+        ]
+        .into_iter()
+        .find(|m| caps.alpha_modes.contains(m));
         let alpha_mode = match alpha_mode {
             Some(mode) => mode,
             None if allow_opaque => caps.alpha_modes[0],
-            None => return Err(format!("no transparent alpha mode, only {:?}", caps.alpha_modes).into()),
+            None => {
+                return Err(
+                    format!("no transparent alpha mode, only {:?}", caps.alpha_modes).into(),
+                );
+            }
         };
         // WebGL wrote the shader's numbers straight to the screen; a
         // non-sRGB format does the same (sRGB would brighten them again).
@@ -159,7 +172,14 @@ impl Gpu {
             "unblinking: {backend:?} on {} ({:?}), alpha {alpha_mode:?} of {:?}, format {format:?}, {}x{}",
             info.name, info.backend, caps.alpha_modes, size.width, size.height
         );
-        Ok(Gpu { window, surface, device, queue, config, eye })
+        Ok(Gpu {
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            eye,
+        })
     }
 
     fn size(&self) -> (u32, u32) {
@@ -180,7 +200,8 @@ impl Gpu {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        self.eye.draw(&self.queue, &mut encoder, &view, self.size(), state);
+        self.eye
+            .draw(&self.queue, &mut encoder, &view, self.size(), state);
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(frame);
@@ -189,8 +210,13 @@ impl Gpu {
 
 /// The eye's window: frameless, see-through, always on top, off the taskbar,
 /// in the top right corner of the primary monitor's work area.
-fn window_attributes(event_loop: &ActiveEventLoop, backend: Backend) -> winit::window::WindowAttributes {
-    let scale = event_loop.primary_monitor().map_or(1.0, |m| m.scale_factor());
+fn window_attributes(
+    event_loop: &ActiveEventLoop,
+    backend: Backend,
+) -> winit::window::WindowAttributes {
+    let scale = event_loop
+        .primary_monitor()
+        .map_or(1.0, |m| m.scale_factor());
     let side = (WIN_SIZE * scale).round();
 
     let mut attrs = Window::default_attributes()
@@ -228,30 +254,89 @@ struct App {
     args: Args,
     gpu: Option<Gpu>,
     started: Instant,
+    last_frame: Instant,
+    mind: Mind,
+    mode: Option<Mode>,
 }
 
 impl App {
-    /// Fake values that keep the eye moving until the mind drives it.
-    fn state(&self) -> EyeState {
-        let t = self.started.elapsed().as_secs_f32();
+    /// Where the cursor, the eye and its monitor are right now.
+    fn world(window: &Window) -> Option<World> {
+        let cursor = desktop::cursor()?;
+        let pos = window.outer_position().ok()?;
+        let size = window.inner_size();
+        let monitor = window.current_monitor()?;
+        let (mp, ms) = (monitor.position(), monitor.size());
+        Some(World {
+            cursor,
+            eye: Point {
+                x: pos.x as f64 + size.width as f64 / 2.0,
+                y: pos.y as f64 + size.height as f64 * 0.42,
+            },
+            display: Rect {
+                x: mp.x as f64,
+                y: mp.y as f64,
+                width: ms.width as f64,
+                height: ms.height as f64,
+            },
+            scale: window.scale_factor(),
+        })
+    }
+
+    /// Advances the mind one frame and turns its mood into the eye's uniforms.
+    fn step(&mut self, window: &Window) -> EyeState {
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f64().min(0.1);
+        self.last_frame = now;
+
+        // No camera or mic yet: nobody in view, silence, cursor only.
+        let s = self.mind.update(
+            dt,
+            &Senses {
+                faces: &[],
+                can_see: false,
+                level: 0.0,
+                world: Self::world(window),
+                blind: false,
+                whispers: true,
+            },
+        );
+
+        // A line in the terminal whenever the mood changes.
+        if self.mode != Some(s.mode) {
+            eprintln!("mode: {:?}", s.mode);
+            self.mode = Some(s.mode);
+        }
+
+        let secs = self.started.elapsed().as_secs_f32();
         EyeState {
-            flow: (t / 4.0) % 1.0,
-            gaze: [(t * 0.7).sin() * 0.6, (t * 1.1).sin() * 0.4],
-            pupil: 0.3 + 0.25 * (t * 0.5).sin(),
-            heat: 0.5 + 0.2 * (t * 0.9).sin(),
-            flare: (1.0 - (t % 5.0)).max(0.0),
-            wide: (t / 2.5).min(1.0),
-            dim: 0.0,
-            center: CENTER,
+            flow: (secs / 4.0) % 1.0,
+            gaze: [s.gaze.x as f32, s.gaze.y as f32],
+            pupil: s.pupil as f32,
+            heat: s.heat as f32,
+            flare: s.flare as f32,
+            wide: s.wide as f32,
+            dim: s.dim as f32,
+            center: [CENTER[0] + s.shake.x as f32, CENTER[1] + s.shake.y as f32],
         }
     }
 
     fn snap(&self, gpu: &Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
         let size = gpu.size();
-        let rgba = eye::read_frame(&gpu.device, &gpu.queue, &gpu.eye, gpu.config.format, size, state);
+        let rgba = eye::read_frame(
+            &gpu.device,
+            &gpu.queue,
+            &gpu.eye,
+            gpu.config.format,
+            size,
+            state,
+        );
         write_snap("snap.png", size, &rgba)?;
         let (clear, partial, solid) = alpha_census(&rgba);
-        eprintln!("snap.png written: {}x{}, alpha clear {clear} / partial {partial} / solid {solid} px", size.0, size.1);
+        eprintln!(
+            "snap.png written: {}x{}, alpha clear {clear} / partial {partial} / solid {solid} px",
+            size.0, size.1
+        );
         Ok(())
     }
 }
@@ -291,21 +376,29 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             // Drag the eye anywhere with the left button.
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if let Some(gpu) = &self.gpu {
                     let _ = gpu.window.drag_window();
                 }
             }
             // No tray menu yet, so a right click closes it.
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                event_loop.exit()
-            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                let state = self.state();
                 let snap_due = self.args.snap.is_some_and(|d| self.started.elapsed() >= d);
                 // `take()` moves the Gpu out of the Option for a moment, so we
                 // can borrow it and `self` at the same time; we put it back after.
-                let Some(mut gpu) = self.gpu.take() else { return };
+                let Some(mut gpu) = self.gpu.take() else {
+                    return;
+                };
+                let state = self.step(&gpu.window);
                 gpu.render(&state);
                 if snap_due {
                     if let Err(err) = self.snap(&gpu, &state) {
@@ -363,7 +456,17 @@ fn alpha_census(rgba: &[u8]) -> (usize, usize, usize) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
-    let mut app = App { args: Args::parse(), gpu: None, started: Instant::now() };
+    // For now the mind's whispers go to the terminal.
+    let say: mind::Say = Box::new(|text, kind| eprintln!("whisper ({kind:?}): {text}"));
+    let now = Instant::now();
+    let mut app = App {
+        args: Args::parse(),
+        gpu: None,
+        started: now,
+        last_frame: now,
+        mind: Mind::new(say),
+        mode: None,
+    };
     event_loop.run_app(&mut app)?;
     Ok(())
 }

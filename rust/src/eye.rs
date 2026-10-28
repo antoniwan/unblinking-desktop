@@ -65,11 +65,17 @@ impl Eye {
         // so the exe needs no shader files next to it.
         let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("eye.vert"),
-            source: glsl(include_str!("shaders/eye.vert"), wgpu::naga::ShaderStage::Vertex),
+            source: glsl(
+                include_str!("shaders/eye.vert"),
+                wgpu::naga::ShaderStage::Vertex,
+            ),
         });
         let fs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("eye.frag"),
-            source: glsl(include_str!("shaders/eye.frag"), wgpu::naga::ShaderStage::Fragment),
+            source: glsl(
+                include_str!("shaders/eye.frag"),
+                wgpu::naga::ShaderStage::Fragment,
+            ),
         });
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -94,7 +100,10 @@ impl Eye {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("eye"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("eye"),
@@ -129,7 +138,11 @@ impl Eye {
             cache: None,
         });
 
-        Eye { pipeline, uniforms, bind_group }
+        Eye {
+            pipeline,
+            uniforms,
+            bind_group,
+        }
     }
 
     /// Records one draw of the eye into `target`, cleared to transparent first.
@@ -141,7 +154,11 @@ impl Eye {
         size: (u32, u32),
         state: &EyeState,
     ) {
-        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&Uniforms::new(size, state)));
+        queue.write_buffer(
+            &self.uniforms,
+            0,
+            bytemuck::bytes_of(&Uniforms::new(size, state)),
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("eye"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -194,7 +211,8 @@ pub fn read_frame(
 
     // GPU copies want each row padded to a multiple of 256 bytes.
     let row = w * 4;
-    let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded =
+        row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("snap readback"),
         size: (padded * h) as u64,
@@ -220,10 +238,17 @@ pub fn read_frame(
 
     // Mapping is asynchronous: ask for it, then block until the GPU is done.
     let slice = buffer.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |result| result.expect("map snapshot buffer"));
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("wait for GPU");
+    slice.map_async(wgpu::MapMode::Read, |result| {
+        result.expect("map snapshot buffer")
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("wait for GPU");
 
-    let bgra = matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
     let data = slice.get_mapped_range().expect("read snapshot buffer");
     let mut out = Vec::with_capacity((row * h) as usize);
     for y in 0..h as usize {
@@ -240,5 +265,9 @@ pub fn read_frame(
 }
 
 fn size_3d(width: u32, height: u32) -> wgpu::Extent3d {
-    wgpu::Extent3d { width, height, depth_or_array_layers: 1 }
+    wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    }
 }
