@@ -32,7 +32,13 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-if (!app.requestSingleInstanceLock()) app.quit();
+// A second launch just wakes the first one (see 'second-instance') and leaves.
+const IS_PRIMARY = app.requestSingleInstanceLock();
+if (!IS_PRIMARY) app.quit();
+
+// Everything the user can toggle, saved in userData/prefs.json.
+// voice: speak whispers and let the eye hum (renderer/voice.js); off by default.
+const PREF_DEFAULTS = { whispers: true, blind: false, clickThrough: false, voice: false, position: null };
 
 let win = null;
 let tray = null;
@@ -43,13 +49,23 @@ function prefsPath() {
   return path.join(app.getPath('userData'), 'prefs.json');
 }
 
+// A missing or hand-mangled file falls back to the defaults, key by key.
 function loadPrefs() {
-  const defaults = { whispers: true, blind: false, clickThrough: false, position: null };
+  const prefs = { ...PREF_DEFAULTS };
+  let saved;
   try {
-    return { ...defaults, ...JSON.parse(fs.readFileSync(prefsPath(), 'utf8')) };
-  } catch {
-    return defaults;
+    saved = JSON.parse(fs.readFileSync(prefsPath(), 'utf8'));
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn('could not read prefs, using defaults:', err.message);
+    return prefs;
   }
+  if (!saved || typeof saved !== 'object') return prefs;
+  for (const key of ['whispers', 'blind', 'clickThrough', 'voice']) {
+    if (typeof saved[key] === 'boolean') prefs[key] = saved[key];
+  }
+  const pos = saved.position;
+  if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) prefs.position = { x: pos.x, y: pos.y };
+  return prefs;
 }
 
 function savePrefs() {
@@ -67,7 +83,9 @@ function registerAppProtocol() {
   protocol.handle('app', (request) => {
     const { pathname } = new URL(request.url);
     const filePath = path.normalize(path.join(ROOT, decodeURIComponent(pathname)));
-    if (!filePath.startsWith(ROOT)) return new Response('forbidden', { status: 403 });
+    const rel = path.relative(ROOT, filePath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return new Response('forbidden', { status: 403 });
+    if (!fs.existsSync(filePath)) return new Response('not found', { status: 404 });
     return net.fetch(pathToFileURL(filePath).toString());
   });
 }
@@ -80,11 +98,17 @@ function allowCameraAndMic() {
   ses.setPermissionCheckHandler((_wc, permission) => permission === 'media');
 }
 
+// A refusal here is fine: the renderer finds the sense missing and the eye hunts blind.
 async function askMacMediaAccess() {
   if (!IS_MAC) return;
   for (const kind of ['camera', 'microphone']) {
-    if (systemPreferences.getMediaAccessStatus(kind) !== 'granted') {
-      await systemPreferences.askForMediaAccess(kind);
+    try {
+      if (systemPreferences.getMediaAccessStatus(kind) !== 'granted') {
+        const granted = await systemPreferences.askForMediaAccess(kind);
+        if (!granted) console.warn(`macOS denied ${kind} access`);
+      }
+    } catch (err) {
+      console.warn(`could not ask for ${kind} access:`, err.message);
     }
   }
 }
@@ -167,14 +191,21 @@ function createWindow() {
     console.log(`[renderer:${level}] ${message}`);
   });
 
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error('renderer gone:', details.reason);
+  });
+
   win.on('closed', () => {
     win = null;
+    clearTimeout(moveTimer);
     clearInterval(feedTimer);
+    feedTimer = null;
   });
 
   // Tell the renderer where the eye and the cursor are, about 30 times a second.
+  clearInterval(feedTimer);
   feedTimer = setInterval(() => {
-    if (!win || win.isDestroyed() || !win.isVisible()) return;
+    if (!win || win.isDestroyed() || !win.isVisible() || win.webContents.isCrashed()) return;
     const b = win.getBounds();
     const eye = { x: b.x + b.width / 2, y: b.y + b.height * 0.42 };
     const display = screen.getDisplayNearestPoint({ x: Math.round(eye.x), y: Math.round(eye.y) });
@@ -188,13 +219,18 @@ function createWindow() {
   if (SNAP) {
     const delay = Number(SNAP.split('=')[1]) || 6000;
     setTimeout(async () => {
-      // A dark backdrop, only for the snapshot, so the flames are judged as on a desktop.
-      await win.webContents.executeJavaScript("document.body.style.background = '#1d1f24'");
-      await new Promise((r) => setTimeout(r, 100));
-      const image = await win.webContents.capturePage();
-      const out = path.join(ROOT, 'snap.png');
-      fs.writeFileSync(out, image.toPNG());
-      console.log('snapshot saved:', out);
+      if (!win || win.isDestroyed()) return console.error('snapshot skipped: no window');
+      try {
+        // A dark backdrop, only for the snapshot, so the flames are judged as on a desktop.
+        await win.webContents.executeJavaScript("document.body.style.background = '#1d1f24'");
+        await new Promise((r) => setTimeout(r, 100));
+        const image = await win.webContents.capturePage();
+        const out = path.join(ROOT, 'snap.png');
+        fs.writeFileSync(out, image.toPNG());
+        console.log('snapshot saved:', out);
+      } catch (err) {
+        console.error('snapshot failed:', err.message);
+      }
     }, delay);
   }
 }
@@ -206,7 +242,7 @@ function applyClickThrough() {
 
 function sendPrefs() {
   if (win && !win.isDestroyed()) {
-    win.webContents.send('prefs', { whispers: prefs.whispers, blind: prefs.blind });
+    win.webContents.send('prefs', { whispers: prefs.whispers, blind: prefs.blind, voice: prefs.voice });
   }
 }
 
@@ -216,32 +252,29 @@ function toggleWindow() {
   else win.showInactive();
 }
 
+// A checkbox for a pref the renderer cares about: save it and tell the page.
+function prefToggle(label, key, after) {
+  return {
+    label,
+    type: 'checkbox',
+    checked: prefs[key],
+    click: (item) => {
+      prefs[key] = item.checked;
+      savePrefs();
+      sendPrefs();
+      after?.();
+    },
+  };
+}
+
 function buildMenu() {
   return Menu.buildFromTemplate([
     { label: prefs.blind ? 'Unblinking (blinded)' : 'Unblinking is watching', enabled: false },
     { type: 'separator' },
     { label: win && win.isVisible() ? 'Hide the eye' : 'Show the eye', click: toggleWindow },
-    {
-      label: 'Blind it (camera and mic off)',
-      type: 'checkbox',
-      checked: prefs.blind,
-      click: (item) => {
-        prefs.blind = item.checked;
-        savePrefs();
-        sendPrefs();
-        refreshTray();
-      },
-    },
-    {
-      label: 'Whispers',
-      type: 'checkbox',
-      checked: prefs.whispers,
-      click: (item) => {
-        prefs.whispers = item.checked;
-        savePrefs();
-        sendPrefs();
-      },
-    },
+    prefToggle('Blind it (camera and mic off)', 'blind', refreshTray),
+    prefToggle('Whispers', 'whispers'),
+    prefToggle('Voice', 'voice'),
     {
       label: 'Let clicks pass through',
       type: 'checkbox',
@@ -291,9 +324,11 @@ ipcMain.on('menu', () => {
 
 app.on('second-instance', () => {
   if (win) win.showInactive();
+  else createWindow();
 });
 
 app.whenReady().then(async () => {
+  if (!IS_PRIMARY) return;
   if (IS_MAC && app.dock) app.dock.hide();
   registerAppProtocol();
   allowCameraAndMic();

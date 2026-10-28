@@ -6,6 +6,10 @@
 //
 // Loud sounds make it flinch and flare. Too close makes it burn.
 // Two faces make it look from one to the other.
+//
+// It speaks through the say(text, kind) callback it is given; kind is a key
+// of LINES. update() returns the per-frame state the eye (and anything else
+// that wants to follow its mood) reads: heat 0..1+, flare 0..1, mode, etc.
 
 const LINES = {
   first: ['I see you.'],
@@ -56,6 +60,7 @@ export class Mind {
     this.lineCooldowns = {};
     this.wasBlind = false;
     this.warnedNoSight = false;
+    this.whispers = true;
   }
 
   whisper(kind, cooldown = 20) {
@@ -64,7 +69,7 @@ export class Mind {
     if (this.t < (this.lineCooldowns[kind] ?? 0)) return;
     this.lastWhisper = this.t;
     this.lineCooldowns[kind] = this.t + cooldown;
-    this.say(pick(LINES[kind]));
+    this.say(pick(LINES[kind]), kind);
   }
 
   // Where a face in the camera frame sits in front of the screen, then the
@@ -232,6 +237,8 @@ export class Mind {
     this.shake = Math.max(0, this.shake - dt * 2.5);
 
     // Eyes are never perfectly still.
+    // flare (0..1) spikes on a startle or a return and decays within about a second;
+    // heat is the steady burn, fed by closeness, crowds, restlessness, and the voice.
     const tremor = 0.012;
     const jitter = this.shake * 0.012;
     return {

@@ -12,11 +12,14 @@ const whisperEl = document.getElementById('whisper');
 const eye = createEye(canvas);
 const senses = new Senses(document.getElementById('cam'));
 
+// The latest of everything the main process tells us. Same keys as the
+// prefs main.js sends; these defaults hold until the first message arrives.
 let world = null;
-let prefs = { whispers: true, blind: false };
+let prefs = { whispers: true, blind: false, voice: false };
 let whisperTimer = null;
 
-function say(text) {
+// Every whisper passes through here: kind is the LINES key in mind.js.
+function say(text, kind) {
   console.log('whisper:', text);
   whisperEl.textContent = text;
   whisperEl.classList.add('show');
@@ -27,21 +30,31 @@ function say(text) {
 const mind = new Mind(say);
 
 // Open the camera and mic only once we know it isn't meant to be blind.
+// Blinding and unblinding can arrive quickly; each change waits for the last.
 let started = false;
+let sensesBusy = Promise.resolve();
+function setSight(open) {
+  sensesBusy = sensesBusy
+    .then(() => (open ? senses.open() : senses.close()))
+    .catch((err) => console.error('senses failed:', err.message));
+  return sensesBusy;
+}
+
 function start() {
   if (started) return;
   started = true;
-  if (!prefs.blind) senses.open();
+  if (!prefs.blind) setSight(true);
 }
 
 bridge?.onWorld((w) => (world = w));
-bridge?.onPrefs(async (p) => {
+bridge?.onPrefs((p) => {
   const wasBlind = prefs.blind;
-  prefs = p;
+  prefs = { ...prefs, ...p };
   if (!started) return start();
-  if (p.blind && !wasBlind) senses.close();
-  if (!p.blind && wasBlind) await senses.open();
+  if (prefs.blind && !wasBlind) setSight(false);
+  if (!prefs.blind && wasBlind) setSight(true);
 });
+// Without a word from the main process (or outside Electron), open anyway.
 setTimeout(start, 1500);
 
 // The eye sits a little above center so whispers fit below it.
@@ -50,7 +63,10 @@ const center = IS_MAC ? { x: 0, y: 0.1 } : { x: 0, y: 0.06 };
 
 let last = performance.now();
 let lastLook = 0;
+let lookFailed = false;
 function frame(now) {
+  // Ask for the next frame first, so one bad frame never stops the eye.
+  requestAnimationFrame(frame);
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
 
@@ -59,12 +75,16 @@ function frame(now) {
     lastLook = now;
     try {
       senses.look();
+      lookFailed = false;
     } catch (err) {
-      console.error('look failed:', err.message);
+      // Log once per run of failures, not 15 times a second.
+      if (!lookFailed) console.error('look failed:', err.message);
+      lookFailed = true;
     }
   }
   const level = senses.listen();
 
+  // s: the mind's state this frame (gaze, pupil, heat, flare, wide, dim, shake, mode).
   const s = mind.update(dt, {
     faces: senses.faces,
     canSee: senses.canSee,
@@ -84,7 +104,6 @@ function frame(now) {
     dim: s.dim,
     center: { x: center.x + s.shake.x, y: center.y + s.shake.y },
   });
-  requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
@@ -97,3 +116,6 @@ setInterval(() => {
       ` level=${senses.level.toFixed(2)}`
   );
 }, 3000);
+
+// Let go of the camera and mic when the page goes away.
+window.addEventListener('pagehide', () => senses.close());

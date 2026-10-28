@@ -1,12 +1,19 @@
 // Sight and hearing. Camera frames go to a face detector running locally
 // in WebAssembly; the microphone becomes a single loudness number.
 // Nothing is recorded, stored, or sent anywhere.
+//
+// Every sense can fail on its own (no camera, mic denied, model missing).
+// A missing sense only leaves canSee / canHear false; the eye keeps running.
 import { FilesetResolver, FaceDetector } from '/node_modules/@mediapipe/tasks-vision/vision_bundle.mjs';
 
 const WASM = '/node_modules/@mediapipe/tasks-vision/wasm';
 const MODEL = '/assets/models/blaze_face_short_range.tflite';
 
 async function makeDetector() {
+  // Fail early and plainly if setup never fetched the model.
+  const res = await fetch(MODEL).catch(() => null);
+  if (!res?.ok) throw new Error(`face model missing at ${MODEL}; run \`npm run setup\``);
+
   const fileset = await FilesetResolver.forVisionTasks(WASM);
   const options = (delegate) => ({
     baseOptions: { modelAssetPath: MODEL, delegate },
@@ -21,10 +28,13 @@ async function makeDetector() {
   }
 }
 
+const stopStream = (stream) => stream?.getTracks().forEach((t) => t.stop());
+
 export class Senses {
   constructor(video) {
     this.video = video;
     this.detector = null;
+    this.detectorFailed = false;
     this.videoStream = null;
     this.audioStream = null;
     this.audioCtx = null;
@@ -35,56 +45,112 @@ export class Senses {
     this.faces = [];
     this.level = 0;
     this.lastVideoTime = -1;
+    // Bumped by close(). An open() still awaiting the camera when the eye is
+    // blinded sees the change and lets go of whatever it was handed.
+    this.session = 0;
   }
 
   async open() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.warn('no senses: this page has no access to media devices');
+      return;
+    }
     await Promise.all([this.openEyes(), this.openEars()]);
     console.log(`senses open: sight=${this.canSee} hearing=${this.canHear}`);
   }
 
   async openEyes() {
+    const session = this.session;
+    let stream = null;
     try {
-      this.videoStream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
         audio: false,
       });
-      this.video.srcObject = this.videoStream;
+      if (session !== this.session) return stopStream(stream);
+      this.videoStream = stream;
+      this.video.srcObject = stream;
       await this.video.play();
-      this.detector ??= await makeDetector();
+      if (!this.detector && !this.detectorFailed) {
+        try {
+          this.detector = await makeDetector();
+        } catch (err) {
+          // The model will not appear while the app runs; don't retry on every unblind.
+          this.detectorFailed = true;
+          console.error('face detector failed to load:', err.message);
+        }
+      }
+      if (session !== this.session) return;
+      if (!this.detector) {
+        // A camera without a detector sees nothing, so don't keep its light on.
+        this.closeEyes();
+        return;
+      }
+      // A camera unplugged mid-run ends its track; stop pretending to see.
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+        if (this.videoStream !== stream) return;
+        console.warn('sight lost: camera track ended');
+        this.closeEyes();
+      });
       this.canSee = true;
     } catch (err) {
       console.warn('no sight:', err.name, err.message);
-      this.canSee = false;
+      if (session === this.session) this.closeEyes();
+      else stopStream(stream);
     }
   }
 
   async openEars() {
+    const session = this.session;
+    let stream = null;
     try {
-      this.audioStream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         video: false,
       });
+      if (session !== this.session) return stopStream(stream);
+      this.audioStream = stream;
       this.audioCtx = new AudioContext();
-      const src = this.audioCtx.createMediaStreamSource(this.audioStream);
+      const src = this.audioCtx.createMediaStreamSource(stream);
       this.analyser = this.audioCtx.createAnalyser();
       this.analyser.fftSize = 1024;
       this.samples = new Float32Array(this.analyser.fftSize);
       src.connect(this.analyser);
+      stream.getAudioTracks()[0]?.addEventListener('ended', () => {
+        if (this.audioStream !== stream) return;
+        console.warn('hearing lost: mic track ended');
+        this.closeEars();
+      });
       this.canHear = true;
     } catch (err) {
       console.warn('no hearing:', err.name, err.message);
-      this.canHear = false;
+      if (session === this.session) this.closeEars();
+      else stopStream(stream);
     }
   }
 
   close() {
-    for (const s of [this.videoStream, this.audioStream]) s?.getTracks().forEach((t) => t.stop());
-    this.videoStream = this.audioStream = null;
+    this.session++;
+    this.closeEyes();
+    this.closeEars();
+  }
+
+  closeEyes() {
+    stopStream(this.videoStream);
+    this.videoStream = null;
+    this.video.pause();
     this.video.srcObject = null;
-    this.audioCtx?.close();
-    this.audioCtx = this.analyser = null;
-    this.canSee = this.canHear = false;
+    this.lastVideoTime = -1;
+    this.canSee = false;
     this.faces = [];
+  }
+
+  closeEars() {
+    stopStream(this.audioStream);
+    this.audioStream = null;
+    this.audioCtx?.close().catch(() => {});
+    this.audioCtx = this.analyser = this.samples = null;
+    this.canHear = false;
     this.level = 0;
   }
 
@@ -92,7 +158,7 @@ export class Senses {
   // (not mirrored), size as a fraction of frame width.
   look() {
     const v = this.video;
-    if (!this.canSee || !this.detector || v.readyState < 2) return this.faces;
+    if (!this.canSee || !this.detector || v.readyState < 2 || !v.videoWidth) return this.faces;
     if (v.currentTime === this.lastVideoTime) return this.faces;
     this.lastVideoTime = v.currentTime;
     const result = this.detector.detectForVideo(v, performance.now());
