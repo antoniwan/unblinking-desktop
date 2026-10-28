@@ -7,6 +7,8 @@
 //!   --camera         open "Where's my camera?" at start (also in the tray)
 //!   --senses         open Blinki's Senses at start (also Ctrl+Alt+B, or the tray)
 //!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
+//!   --demo           a scripted 14 s performance: moods, whispers, a flinch (no camera or mic)
+//!   --record=F.gif   save the frames it draws as an animated GIF, then quit when it closes
 //!   --whisper=TEXT   show TEXT as a whisper once the eye opens (for captures)
 //!   --voice          turn all sound (music, voice, effects) on for this run, without saving it
 //!   --blind          start blinded this run (camera and mic off), without saving it
@@ -20,9 +22,11 @@
 
 // Each `mod` line pulls in a file of the same name from src/.
 mod camera_picker;
+mod demo;
 mod desktop;
 mod egui_window;
 mod eye;
+mod feeling;
 mod fonts;
 mod fullscreen;
 mod mind;
@@ -30,12 +34,16 @@ mod moods;
 mod pacing;
 mod placement;
 mod prefs;
+mod record;
+mod remembrance;
 mod senses;
 mod senses_panel;
 mod session;
 mod sound;
+mod themes;
 mod tray;
 mod voice;
+mod wellbeing;
 mod whisper;
 
 use std::error::Error;
@@ -54,16 +62,20 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use feeling::Feeling;
 use mind::{Line, Mind, Mode, Senses, Vec2, World};
 use moods::Moods;
 use prefs::{Position, Prefs};
+use remembrance::Remembrance;
 use senses::Detector;
 use senses::camera::Eyes;
+use senses::expression::Expression;
 use senses::face::YuNet;
 use senses::mic::Ears;
 use senses::wake::{Wake, WakeEvent};
 use tray::{Action, Tray};
 use voice::{Effect, Voice};
+use wellbeing::Watch;
 use whisper::{School, Whispers};
 
 use camera_picker::{CameraPicker, Picked};
@@ -103,6 +115,8 @@ struct Args {
     camera: bool,
     voice: bool,
     whisper: Option<String>,
+    demo: bool,
+    record: Option<String>,
 }
 
 impl Args {
@@ -116,6 +130,8 @@ impl Args {
             camera: false,
             voice: false,
             whisper: None,
+            demo: false,
+            record: None,
         };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
@@ -136,6 +152,10 @@ impl Args {
                 args.mood = Some(name.to_string());
             } else if let Some(text) = arg.strip_prefix("--whisper=") {
                 args.whisper = Some(text.to_string());
+            } else if arg == "--demo" {
+                args.demo = true;
+            } else if let Some(path) = arg.strip_prefix("--record=") {
+                args.record = Some(path.to_string());
             } else if arg == "--voice" {
                 args.voice = true;
             } else if arg == "--camera" {
@@ -499,6 +519,17 @@ fn on_some_screen(event_loop: &ActiveEventLoop, p: Position) -> bool {
 }
 
 /// The whole app. winit calls into it through `ApplicationHandler`.
+/// Hours after midnight before this count as the small hours.
+const LATE_UNTIL_HOUR: u32 = 5;
+/// What it says when you're up too late, and how often at most.
+const WORRY_LINES: [&str; 4] = [
+    "It's late. Rest your eyes.",
+    "Sleep. I will keep watch.",
+    "Even I close my eye sometimes.",
+    "The night is long. Go to bed.",
+];
+const WORRY_EVERY: Duration = Duration::from_secs(30 * 60);
+
 struct App {
     args: Args,
     gpu: Option<Gpu>,
@@ -523,6 +554,14 @@ struct App {
     save_move_at: Option<Instant>,
     last_beat: Instant,
     moods: Moods,
+    /// Picks the mood from the moment, your face and its temperament.
+    feeling: Feeling,
+    /// What it remembers of your days, while "Remember our days" is on.
+    book: Option<Remembrance>,
+    /// Notices breaks, returns and smiles, for the book.
+    watch: Watch,
+    /// The latest reading of your face, while "Read my face" is on.
+    expression: Option<Expression>,
     /// The flame drift's looping phase, 0..1, advanced at the mood's speed.
     flow: f32,
     /// The latest whisper and when, shared with the mind's `say` closure.
@@ -552,9 +591,19 @@ struct App {
     voice: Voice,
     spoken: usize,
     /// A whisper to put on screen once the frame's GPU work is at hand.
-    pending_whisper: Option<&'static str>,
+    pending_whisper: Option<String>,
     /// The startle the flinch effect last played for.
     last_flinch_sound: f64,
+    /// --demo's script, while it plays.
+    demo: Option<demo::Demo>,
+    /// --record's frames, written out when the app ends.
+    recording: Option<record::Recording>,
+    /// Seconds you've been up and here past midnight tonight, and when you
+    /// were last here (face or keyboard/mouse), for the Worried mood.
+    up_late: f32,
+    last_here: Instant,
+    /// When it last told you to rest, so it doesn't nag.
+    last_worry: Option<Instant>,
     /// Proof this is the only copy running; another launch pokes it awake.
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
@@ -614,25 +663,34 @@ impl App {
             Some(eyes) => {
                 let sight = eyes.look();
                 let faces: Vec<_> = sight.detections.iter().map(|d| d.face).collect();
+                self.expression = sight.expression;
                 (faces, sight.can_see)
             }
             None => (vec![], false),
         };
         // The mic hears the speakers, so it goes deaf while the eye speaks.
-        let heard = if self.voice.speaking() {
+        let heard = if let Some(demo) = &self.demo {
+            demo.level()
+        } else if self.voice.speaking() {
             0.0
         } else {
             self.ears.as_ref().map_or(0.0, Ears::level)
         };
+        // In --demo, the cursor follows the script.
+        let mut world = self.world(window);
+        if let (Some(demo), Some(w)) = (&self.demo, &mut world) {
+            w.cursor = demo.cursor(w.eye, w.scale);
+        }
         let s = self.mind.update(
             dt,
             &Senses {
                 faces: &faces,
                 can_see,
                 level: heard,
-                world: self.world(window),
-                blind: self.prefs.blind,
-                whispers: self.prefs.whispers,
+                world,
+                blind: self.prefs.blind && self.demo.is_none(),
+                // In --demo the script does the talking.
+                whispers: self.prefs.whispers && self.demo.is_none(),
             },
         );
 
@@ -685,7 +743,7 @@ impl App {
         };
         if let Some(text) = latest {
             if self.prefs.whispers {
-                self.pending_whisper = Some(text);
+                self.pending_whisper = Some(text.to_string());
             }
             self.voice.say(text);
         }
@@ -705,20 +763,96 @@ impl App {
         if level > 0.3 {
             self.last_noise = now;
         }
+        // Your face, if you let it read it (None otherwise).
+        let expression = self.expression;
+
+        // What it remembers: notice good deeds, and whisper any first.
+        if let Some(book) = &mut self.book {
+            let firsts = self.watch.update(
+                &wellbeing::Signals {
+                    now: remembrance::unix_now(),
+                    dt: dt as f32,
+                    face: !faces.is_empty(),
+                    idle_secs: desktop::idle_secs(),
+                    hour: desktop::local_hour(),
+                    expression,
+                },
+                book,
+            );
+            if let Some(first) = firsts.into_iter().next() {
+                eprintln!("remembered a first: {}", first.line);
+                if self.prefs.whispers {
+                    self.voice.say(&first.line);
+                    self.pending_whisper = Some(first.line);
+                }
+            }
+        }
+        // Up late: time here (face, or input in the last 30 s) after
+        // midnight. Five minutes away, or morning, starts it over.
+        let here = !faces.is_empty() || desktop::idle_secs().is_some_and(|i| i < 30.0);
+        if here {
+            self.last_here = now;
+        }
+        let small_hours = desktop::local_hour() < LATE_UNTIL_HOUR;
+        if !small_hours || self.last_here.elapsed() > Duration::from_secs(300) {
+            self.up_late = 0.0;
+        } else if here {
+            self.up_late += dt as f32;
+        }
+
+        let now_unix = remembrance::unix_now();
+        let temperament = self.book.as_ref().map(|b| b.temperament(now_unix));
+
+        let choice = self.feeling.update(
+            dt as f32,
+            &feeling::Context {
+                mode: s.mode,
+                last_said: self
+                    .last_said
+                    .get()
+                    .map(|(kind, at)| (kind, at.elapsed().as_secs_f32())),
+                no_face_secs: self
+                    .last_face
+                    .map_or(self.started.elapsed(), |t| t.elapsed())
+                    .as_secs_f32(),
+                hour: desktop::local_hour(),
+                quiet_secs: self.last_noise.elapsed().as_secs_f32(),
+                too_close: faces.iter().any(|f| f.score > 0.55 && f.size > 0.5),
+                crowd: mind::crowd_size(&faces),
+                temperament,
+                expression,
+                up_late_secs: self.up_late,
+            },
+        );
+        // Worried: tell you to rest, gently, at most twice an hour.
+        if choice.mood == "Worried" && self.last_worry.is_none_or(|t| t.elapsed() > WORRY_EVERY) {
+            self.last_worry = Some(now);
+            let line = WORRY_LINES[fastrand::usize(..WORRY_LINES.len())];
+            eprintln!("worried: {line}");
+            if self.prefs.whispers {
+                self.voice.say(line);
+                self.pending_whisper = Some(line.to_string());
+            }
+        }
         // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
-        let mood = self
-            .args
-            .mood
-            .as_deref()
-            .map(|m| (m, "held by --mood"))
-            .or_else(|| {
-                let sulk = self.fullscreen.sulk().filter(|_| !self.prefs.blind);
-                sulk.map(|m| (m, "sulking after a full-screen app"))
-            })
-            .unwrap_or_else(|| self.choose_mood(&s, &faces));
-        let (mood, reason) = mood;
+        let sulk = self.fullscreen.sulk().filter(|_| !self.prefs.blind);
+        let (mood, reason) = match (self.args.mood.as_deref(), &self.demo, sulk) {
+            (Some(m), _, _) => (m, "held by --mood"),
+            (None, Some(demo), _) => (demo.mood(), "the --demo script"),
+            (None, None, Some(m)) => (m, "sulking after a full-screen app"),
+            (None, None, None) => (choice.mood, choice.reason),
+        };
+        if let Some(text) = self.demo.as_mut().and_then(|d| d.whisper()) {
+            self.pending_whisper = Some(text.to_string());
+        }
         self.moods.set(mood);
-        let look = self.moods.now();
+        let mut look = self.moods.now();
+        if let (Some(t), Some(book)) = (temperament, &self.book) {
+            // Remembrance's day runs 0.45 (left alone) to 1 (well cared for);
+            // tint wants 0..1 with 0.5 an ordinary day.
+            let day = (book.day_brightness(now_unix) - 0.45) / 0.55 * 0.5 + 0.25;
+            look = feeling::tint(look, &t, day);
+        }
         self.flow = (self.flow + dt as f32 * look.flow) % 1.0;
 
         // Opening, the eye grows and fades in with its pupil wide, then the
@@ -830,7 +964,10 @@ impl App {
                 .filter(|(_, f)| **f)
                 .map(|(i, _)| i)
                 .collect(),
-            heard: self.ears.as_ref().map(Ears::level),
+            heard: match &self.demo {
+                Some(demo) => Some(demo.level()),
+                None => self.ears.as_ref().map(Ears::level),
+            },
             whispers,
             cursor: world.map(|w| w.cursor),
             eye: world.map(|w| w.eye),
@@ -842,6 +979,11 @@ impl App {
                 || "top middle of the main screen (default)".to_string(),
                 |c| c.describe(),
             ),
+            remembers: self.book.as_ref().map(|b| {
+                let traits = b.traits().into_iter().map(|t| t.name()).collect();
+                (traits, b.journal().last().map(|e| e.line.clone()))
+            }),
+            expression: self.expression,
             insight,
         });
     }
@@ -904,43 +1046,6 @@ impl App {
         }
     }
 
-    /// Picks the mood from the studio's triggers, most urgent first.
-    /// Returns the mood's name and the reason, for Blinki's Senses.
-    fn choose_mood(&self, s: &mind::Frame, faces: &[mind::Face]) -> (&'static str, &'static str) {
-        let said_lately = |kinds: &[Line], secs: f32| {
-            self.last_said.get().is_some_and(|(kind, at)| {
-                kinds.contains(&kind) && at.elapsed().as_secs_f32() < secs
-            })
-        };
-        let no_face_for = self
-            .last_face
-            .map_or(self.started.elapsed(), |t| t.elapsed());
-        let hour = desktop::local_hour();
-        let late = !(6..23).contains(&hour);
-        let quiet = self.last_noise.elapsed() > Duration::from_secs(120);
-        let too_close = faces.iter().any(|f| f.score > 0.55 && f.size > 0.5);
-
-        if s.mode == Mode::Blind {
-            ("Blinded", "you blinded it")
-        } else if said_lately(&[Line::Loud], 3.0) {
-            ("Wrathful", "a bang, just now")
-        } else if too_close {
-            ("Wrathful", "a face far too close")
-        } else if said_lately(&[Line::Returned, Line::First], 4.0) {
-            ("Delighted", "you came into view")
-        } else if mind::crowd_size(faces) > 1 {
-            ("Suspicious", "two or more people")
-        } else if late && quiet {
-            ("Drowsy", "late, and quiet for two minutes")
-        } else if s.mode == Mode::Locked {
-            ("Watchful", "a face in view")
-        } else if no_face_for > Duration::from_secs(60) {
-            ("Lonely", "no face for over a minute")
-        } else {
-            ("Curious", "looking around")
-        }
-    }
-
     /// Opens or closes the camera and mic together. Closing really stops the
     /// devices: setting the Options to `None` drops the Eyes and Ears, and
     /// their `Drop` code lets go of the hardware.
@@ -948,6 +1053,7 @@ impl App {
         if !open {
             self.eyes = None;
             self.ears = None;
+            self.expression = None;
             self.sync_wake();
             eprintln!("senses closed");
             return;
@@ -957,6 +1063,9 @@ impl App {
                 let net = YuNet::new().map_err(|e| e.to_string())?;
                 Ok(Box::new(net) as Box<dyn Detector>)
             }));
+            if let Some(eyes) = &mut self.eyes {
+                eyes.set_feel(self.prefs.feel);
+            }
         }
         if self.ears.is_none() {
             // `.map_err(..).ok()` logs a failure and carries on deaf:
@@ -976,7 +1085,7 @@ impl App {
             self.wake = None;
         } else if self.wake.is_none() {
             // No name pref yet, so only "Hey, OG Blinki" and "Hey Blinki".
-            self.wake = Some(Wake::start(None));
+            self.wake = Some(Wake::start(self.prefs.name.clone()));
         }
     }
 
@@ -999,7 +1108,7 @@ impl App {
                 self.prefs.save();
                 if self.prefs.whispers {
                     const DEAF: &str = "I can't hear names on this computer yet.";
-                    self.pending_whisper = Some(DEAF);
+                    self.pending_whisper = Some(DEAF.to_string());
                     self.voice.say(DEAF);
                 }
             }
@@ -1064,6 +1173,41 @@ impl App {
                 self.prefs.click_through = on;
                 let _ = window.set_cursor_hittest(!on);
             }
+            Action::Theme(id) => {
+                self.prefs.theme = Some(id.to_string());
+                self.moods.set_theme(id);
+            }
+            Action::ReadFace(on) => {
+                self.prefs.feel = on;
+                if let Some(eyes) = &mut self.eyes {
+                    eyes.set_feel(on);
+                }
+                if !on {
+                    self.expression = None;
+                }
+            }
+            Action::Forget => {
+                // Wipes the file. If it's still remembering, it starts afresh.
+                let now = remembrance::unix_now();
+                match &mut self.book {
+                    Some(book) => book.forget(now),
+                    None => Remembrance::load(now).forget(now),
+                }
+                self.watch = Watch::new();
+                eprintln!("forgot our days");
+            }
+            Action::Remember(on) => {
+                self.prefs.remember = on;
+                // Off: save what it has and stop noticing. The file stays
+                // on this computer until "Forget our days".
+                if let Some(mut book) = self.book.take() {
+                    book.save(remembrance::unix_now());
+                }
+                if on {
+                    self.book = Some(Remembrance::load(remembrance::unix_now()));
+                    self.watch = Watch::new();
+                }
+            }
         }
         if !matches!(
             action,
@@ -1072,6 +1216,7 @@ impl App {
                 | Action::Senses
                 | Action::WhereCamera
                 | Action::StartWithComputer(_)
+                | Action::Forget
         ) {
             self.prefs.save();
         }
@@ -1100,6 +1245,11 @@ impl App {
 
     /// Starts closing the eye; the frame loop hides or quits once it's done.
     fn close(&mut self, after: AfterClose, event_loop: &ActiveEventLoop) {
+        if after == AfterClose::Quit
+            && let Some(book) = &mut self.book
+        {
+            book.save(remembrance::unix_now());
+        }
         if self.presence == Presence::Hidden {
             // Nothing on screen to animate.
             if after == AfterClose::Quit {
@@ -1176,8 +1326,21 @@ impl App {
 
     fn snap(&self, gpu: &mut Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
         let size = gpu.size();
+        let rgba = self.grab(gpu, state);
+        write_snap("snap.png", size, &rgba)?;
+        let (clear, partial, solid) = alpha_census(&rgba);
+        eprintln!(
+            "snap.png written: {}x{}, alpha clear {clear} / partial {partial} / solid {solid} px",
+            size.0, size.1
+        );
+        Ok(())
+    }
+
+    /// The frame as drawn (eye and whispers), read back as premultiplied RGBA.
+    fn grab(&self, gpu: &mut Gpu, state: &EyeState) -> Vec<u8> {
+        let size = gpu.size();
         let scale = gpu.window.scale_factor() as f32;
-        let rgba = eye::read_frame(
+        eye::read_frame(
             &gpu.device,
             &gpu.queue,
             &gpu.eye,
@@ -1196,14 +1359,7 @@ impl App {
                     state.fade,
                 )
             },
-        );
-        write_snap("snap.png", size, &rgba)?;
-        let (clear, partial, solid) = alpha_census(&rgba);
-        eprintln!(
-            "snap.png written: {}x{}, alpha clear {clear} / partial {partial} / solid {solid} px",
-            size.0, size.1
-        );
-        Ok(())
+        )
     }
 }
 
@@ -1232,7 +1388,12 @@ impl ApplicationHandler for App {
                         self.tray = Tray::new(&self.prefs)
                             .map_err(|err| eprintln!("no tray icon: {err}"))
                             .ok();
-                        self.set_senses(!self.prefs.blind);
+                        if self.args.demo {
+                            // The script plays the senses; the camera and mic stay off.
+                            self.demo = Some(demo::Demo::new());
+                        } else {
+                            self.set_senses(!self.prefs.blind);
+                        }
                         if let Some(gpu) = &self.gpu {
                             let window = gpu.window.clone();
                             self.refresh_monitors(&window);
@@ -1312,7 +1473,7 @@ impl ApplicationHandler for App {
                 if let Some(text) = self.pending_whisper.take() {
                     self.voice.effect(Effect::Chime);
                     gpu.whispers
-                        .show(text, School::of_mood(&self.moods.current().name));
+                        .show(&text, School::of_mood(&self.moods.current().name));
                 }
                 if self.presence == Presence::Open
                     && let Some(text) = self.args.whisper.take()
@@ -1333,6 +1494,18 @@ impl ApplicationHandler for App {
                 // While hidden (still drawing for the egui windows), skip the eye.
                 if self.presence != Presence::Hidden {
                     gpu.render(&state);
+                }
+                // --record: keep this frame, as drawn.
+                if self.recording.as_ref().is_some_and(|r| r.wants_frame()) {
+                    let size = gpu.size();
+                    let rgba = self.grab(&mut gpu, &state);
+                    if let Some(r) = &mut self.recording {
+                        r.add(size, rgba);
+                    }
+                }
+                // --demo: when the performance is over, close the eye (and quit).
+                if self.demo.as_ref().is_some_and(|d| d.done()) && self.presence == Presence::Open {
+                    self.close(AfterClose::Quit, event_loop);
                 }
                 // The camera picker too, saving each move as it's made.
                 if let Some(picker) = &mut self.picker {
@@ -1523,6 +1696,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             ..prefs.sound
         };
     }
+    let moods = Moods::of_theme(prefs.theme.as_deref());
+    let book = prefs
+        .remember
+        .then(|| Remembrance::load(remembrance::unix_now()));
     let mut app = App {
         args,
         gpu: None,
@@ -1540,7 +1717,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         presence: Presence::Hidden,
         save_move_at: None,
         last_beat: now,
-        moods: Moods::load(),
+        moods,
+        feeling: Feeling::new(),
+        book,
+        watch: Watch::new(),
+        expression: None,
         flow: 0.0,
         last_said,
         last_face: None,
@@ -1562,11 +1743,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         spoken: 0,
         pending_whisper: None,
         last_flinch_sound: f64::NEG_INFINITY,
+        demo: None,
+        recording: None,
+        up_late: 0.0,
+        last_here: now,
+        last_worry: None,
         _hotkeys: hotkeys,
         instance,
         fullscreen: fullscreen::Watcher::new(),
     };
     app.apply_sound();
+    app.recording = app.args.record.clone().map(record::Recording::new);
+    if app.recording.is_some() {
+        // A GIF has no sound, so a recording plays none (and saves nothing).
+        app.prefs.sound.master = false;
+        app.apply_sound();
+    }
     event_loop.run_app(&mut app)?;
+    if let Some(recording) = app.recording.take() {
+        recording.finish()?;
+    }
     Ok(())
 }

@@ -43,7 +43,7 @@ impl School {
             "Delighted" => School::Fae,
             "Suspicious" => School::Druidic,
             "Drowsy" => School::Astral,
-            "Blinded" => School::Warding,
+            "Blinded" | "Worried" => School::Warding,
             _ => School::Pyromancy,
         }
     }

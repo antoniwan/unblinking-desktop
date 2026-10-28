@@ -8,6 +8,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 use winit::window::Window;
 
 use crate::prefs::Prefs;
+use crate::themes::Themes;
 
 /// The mixer's switches.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,7 +52,27 @@ pub enum Action {
     StartWithComputer(bool),
     /// Hide during full-screen games, videos and presentations.
     HideFullscreen(bool),
+    /// Become the theme with this id. `&'static str` works because the
+    /// themes are parsed once and kept for the whole run.
+    Theme(&'static str),
+    /// "Read my face": smiles and where you look, read on this computer.
+    ReadFace(bool),
+    /// "Remember our days": keep the Remembrance ledger on this computer.
+    Remember(bool),
+    /// "Forget our days": wipe the Remembrance ledger from this computer.
+    Forget,
     Quit,
+}
+
+/// The header line: "Ember is watching", or "Unblinking is watching" if
+/// it has no name yet. A plain function so it can be tested without a tray.
+fn header(prefs: &Prefs) -> String {
+    let who = prefs.name.as_deref().unwrap_or("Unblinking");
+    if prefs.blind {
+        format!("{who} (blinded)")
+    } else {
+        format!("{who} is watching")
+    }
 }
 
 pub struct Tray {
@@ -73,6 +94,11 @@ pub struct Tray {
     where_camera: MenuItem,
     autostart: CheckMenuItem,
     hide_fullscreen: CheckMenuItem,
+    /// One tick item per theme in the Theme submenu, with its id.
+    themes: Vec<(&'static str, CheckMenuItem)>,
+    read_face: CheckMenuItem,
+    remember: CheckMenuItem,
+    forget: MenuItem,
     quit: MenuItem,
 }
 
@@ -111,6 +137,29 @@ impl Tray {
             prefs.hide_fullscreen,
             None,
         );
+        // Who it is: one tick per theme this build can draw. Picking one is
+        // like a radio button; `refresh` keeps exactly one ticked.
+        let theme_menu = Submenu::new("Theme", true);
+        let mut themes = Vec::new();
+        for theme in Themes::builtin().drawable() {
+            let item = CheckMenuItem::new(&theme.name, true, false, None);
+            theme_menu.append(&item)?;
+            themes.push((theme.id.as_str(), item));
+        }
+        // Both are off until asked for, and say plainly where things stay.
+        let read_face = CheckMenuItem::new(
+            "Read my face (smiles stay on this computer)",
+            true,
+            prefs.feel,
+            None,
+        );
+        let remember = CheckMenuItem::new(
+            "Remember our days (kept only on this computer)",
+            true,
+            prefs.remember,
+            None,
+        );
+        let forget = MenuItem::new("Forget our days", true, None);
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
@@ -124,6 +173,12 @@ impl Tray {
         menu.append(&wake_word)?;
         menu.append(&autostart)?;
         menu.append(&hide_fullscreen)?;
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&theme_menu)?;
+        menu.append(&read_face)?;
+        menu.append(&remember)?;
+        menu.append(&forget)?;
+        menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&where_camera)?;
         menu.append(&look_at_me)?;
         menu.append(&senses)?;
@@ -157,6 +212,10 @@ impl Tray {
             where_camera,
             autostart,
             hide_fullscreen,
+            themes,
+            read_face,
+            remember,
+            forget,
             quit,
         };
         tray.refresh(prefs, true);
@@ -192,6 +251,14 @@ impl Tray {
                 Action::StartWithComputer(self.autostart.is_checked())
             } else if id == self.hide_fullscreen.id() {
                 Action::HideFullscreen(self.hide_fullscreen.is_checked())
+            } else if id == self.read_face.id() {
+                Action::ReadFace(self.read_face.is_checked())
+            } else if id == self.remember.id() {
+                Action::Remember(self.remember.is_checked())
+            } else if id == self.forget.id() {
+                Action::Forget
+            } else if let Some((theme, _)) = self.themes.iter().find(|(_, item)| id == item.id()) {
+                Action::Theme(theme)
             } else if id == self.where_camera.id() {
                 Action::WhereCamera
             } else if id == self.senses.id() {
@@ -220,12 +287,7 @@ impl Tray {
 
     /// Brings labels, ticks and the tooltip in line with the prefs.
     pub fn refresh(&self, prefs: &Prefs, visible: bool) {
-        let watching = if prefs.blind {
-            "Unblinking (blinded)"
-        } else {
-            "Unblinking is watching"
-        };
-        self.status.set_text(watching);
+        self.status.set_text(header(prefs));
         self.shown.set_text(if visible {
             "Hide the eye"
         } else {
@@ -240,6 +302,13 @@ impl Tray {
         self.click_through.set_checked(prefs.click_through);
         self.hide_fullscreen.set_checked(prefs.hide_fullscreen);
         self.wake_word.set_checked(prefs.wake_word);
+        self.read_face.set_checked(prefs.feel);
+        self.remember.set_checked(prefs.remember);
+        // `pick` falls back to the default, so a stale pref still ticks one.
+        let theme = Themes::builtin().pick(prefs.theme.as_deref());
+        for (id, item) in &self.themes {
+            item.set_checked(*id == theme.id);
+        }
         let tip = if prefs.blind {
             "Unblinking: blinded"
         } else {
@@ -294,4 +363,19 @@ fn tray_picture() -> Result<Icon, Box<dyn Error>> {
         }
     }
     Ok(Icon::from_rgba(rgba, N, N)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_header_uses_its_name() {
+        let mut prefs = Prefs::default();
+        assert_eq!(header(&prefs), "Unblinking is watching");
+        prefs.name = Some("Ember".into());
+        assert_eq!(header(&prefs), "Ember is watching");
+        prefs.blind = true;
+        assert_eq!(header(&prefs), "Ember (blinded)");
+    }
 }

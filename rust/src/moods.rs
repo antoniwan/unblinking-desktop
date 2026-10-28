@@ -1,18 +1,20 @@
 //! Moods: the colours and feel of each of the blinki's states, as tuned in
 //! the Blinki Studio and exported to assets/blinki.json. The mind decides
 //! *what* the eye does; the mood decides how the fire looks while it does it.
+//! Each theme (see themes.rs) has its own version of every mood.
 
 use std::time::Instant;
 
 use serde::Deserialize;
 
-/// The studio's export, built into the exe. `Deserialize` is derived: serde
-/// writes the code that fills these structs from JSON, matching field names.
-static BLINKI_JSON: &str = include_str!("../assets/blinki.json");
+use crate::themes::{Theme, Themes};
 
 /// How long one mood takes to melt into the next (the studio's BLEND).
 const BLEND_SECS: f32 = 1.4;
 
+/// One mood, as one theme plays it. `Deserialize` is derived: serde writes
+/// the code that fills this struct from JSON, matching field names. Keys the
+/// struct doesn't name (the studio's "trigger" and "pupil") are skipped.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Mood {
     pub name: String,
@@ -30,11 +32,6 @@ pub struct Mood {
     pub shake: f32,
     pub swirl: f32,
     pub wake: f32,
-}
-
-#[derive(Deserialize)]
-struct Blinki {
-    moods: Vec<Mood>,
 }
 
 /// One mood as numbers the shader can use, with colours in linear light so
@@ -108,9 +105,11 @@ fn from_linear(v: f32) -> f32 {
     v.max(0.0).powf(1.0 / 2.2)
 }
 
-/// All the moods, and a smooth blend toward whichever one is current.
+/// One theme's moods, and a smooth blend toward whichever one is current.
 pub struct Moods {
-    moods: Vec<Mood>,
+    /// `&'static`: the themes are parsed once and live for the whole run
+    /// (see `Themes::builtin`), so we can point at one instead of copying it.
+    theme: &'static Theme,
     current: usize,
     from: Look,
     to: Look,
@@ -118,14 +117,19 @@ pub struct Moods {
 }
 
 impl Moods {
+    /// The default theme's moods (The Burning Eye), starting Watchful.
+    #[cfg(test)]
     pub fn load() -> Moods {
-        // The file is ours and checked by a test, so a parse failure is a bug.
-        let blinki: Blinki =
-            serde_json::from_str(BLINKI_JSON).expect("assets/blinki.json is valid");
-        assert!(!blinki.moods.is_empty(), "blinki.json has no moods");
-        let first = Look::of(&blinki.moods[0]);
+        Moods::of_theme(None)
+    }
+
+    /// The moods of the theme saved in prefs (`prefs.theme.as_deref()`),
+    /// falling back to the default if it's missing or can't be drawn.
+    pub fn of_theme(id: Option<&str>) -> Moods {
+        let theme = Themes::builtin().pick(id);
+        let first = Look::of(&theme.moods[0]);
         Moods {
-            moods: blinki.moods,
+            theme,
             current: 0,
             from: first,
             to: first,
@@ -133,16 +137,45 @@ impl Moods {
         }
     }
 
+    /// Who it is right now.
+    #[allow(dead_code)] // until main.rs shows the theme
+    pub fn theme(&self) -> &'static Theme {
+        self.theme
+    }
+
+    /// Becomes another theme, keeping the same mood: the eye melts from one
+    /// creature's Watchful into the other's, over the usual blend.
+    #[allow(dead_code)] // until main.rs wires the Theme menu
+    pub fn set_theme(&mut self, id: &str) {
+        let theme = Themes::builtin().pick(Some(id));
+        // `ptr::eq` asks "the very same theme?", not "an equal-looking one?".
+        if std::ptr::eq(theme, self.theme) {
+            return;
+        }
+        let name = &self.theme.moods[self.current].name;
+        let i = theme
+            .moods
+            .iter()
+            .position(|m| &m.name == name)
+            .unwrap_or(0);
+        self.from = self.now();
+        self.theme = theme;
+        self.current = i;
+        self.to = Look::of(&theme.moods[i]);
+        self.since = Instant::now();
+        eprintln!("theme: {}", theme.name);
+    }
+
     /// Starts blending toward the mood called `name` (if it exists and isn't current).
     pub fn set(&mut self, name: &str) {
-        let Some(i) = self.moods.iter().position(|m| m.name == name) else {
+        let Some(i) = self.theme.moods.iter().position(|m| m.name == name) else {
             return;
         };
         if i == self.current {
             return;
         }
         self.from = self.now();
-        self.to = Look::of(&self.moods[i]);
+        self.to = Look::of(&self.theme.moods[i]);
         self.current = i;
         self.since = Instant::now();
         eprintln!("mood: {name}");
@@ -161,7 +194,7 @@ impl Moods {
     }
 
     pub fn current(&self) -> &Mood {
-        &self.moods[self.current]
+        &self.theme.moods[self.current]
     }
 }
 
@@ -172,7 +205,8 @@ mod tests {
     #[test]
     fn the_studio_export_parses() {
         let moods = Moods::load();
-        assert_eq!(moods.moods.len(), 8);
+        assert_eq!(moods.theme().name, "The Burning Eye");
+        assert_eq!(moods.theme.moods.len(), 9);
         assert_eq!(moods.current().name, "Watchful");
         for name in [
             "Curious",
@@ -183,7 +217,7 @@ mod tests {
             "Drowsy",
             "Blinded",
         ] {
-            assert!(moods.moods.iter().any(|m| m.name == name), "missing {name}");
+            assert!(moods.theme.mood(name).is_some(), "missing {name}");
         }
     }
 
@@ -212,7 +246,7 @@ mod tests {
     fn every_mood_has_real_colours_and_sane_numbers() {
         // Guards the studio export: a typo'd colour would silently turn black.
         let moods = Moods::load();
-        for m in &moods.moods {
+        for m in &moods.theme.moods {
             for c in &m.colors {
                 let digits = c.trim_start_matches('#');
                 assert!(
@@ -248,8 +282,8 @@ mod tests {
     #[test]
     fn mixing_is_a_straight_line_between_two_looks() {
         let moods = Moods::load();
-        let a = Look::of(&moods.moods[0]);
-        let b = Look::of(&moods.moods[1]);
+        let a = Look::of(&moods.theme.moods[0]);
+        let b = Look::of(&moods.theme.moods[1]);
         assert_eq!(Look::mix(&a, &b, 0.0), a);
         assert_eq!(Look::mix(&a, &b, 1.0), b);
         let mid = Look::mix(&a, &b, 0.5);
@@ -298,5 +332,14 @@ mod tests {
         let quarter = at(&mut moods, BLEND_SECS / 4.0);
         assert!((half - 0.5).abs() < 0.02, "half {half}");
         assert!(quarter < 0.25, "quarter {quarter}");
+    }
+
+    #[test]
+    fn an_unknown_theme_falls_back_and_keeps_the_mood() {
+        let mut moods = Moods::of_theme(Some("no-such-theme"));
+        assert_eq!(moods.theme().id, crate::themes::DEFAULT);
+        moods.set("Lonely");
+        moods.set_theme("also-not-a-theme");
+        assert_eq!(moods.current().name, "Lonely", "same theme, mood kept");
     }
 }

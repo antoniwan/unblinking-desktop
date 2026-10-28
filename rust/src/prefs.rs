@@ -40,7 +40,20 @@ pub struct Prefs {
     pub hide_fullscreen: bool,
     /// Listen for "Hey, OG Blinki" (Rust app only). Off by default.
     pub wake_word: bool,
+    /// What you call your blinki, if you've named it (Rust app only).
+    pub name: Option<String>,
+    /// Which theme it is, by id (see themes.rs). None is The Burning Eye.
+    pub theme: Option<String>,
+    /// "Read my face": read smiles and where you look, on this computer
+    /// only. Off unless you turn it on.
+    pub feel: bool,
+    /// "Remember our days": keep the Remembrance ledger on this computer.
+    /// Off unless you turn it on.
+    pub remember: bool,
 }
+
+/// A name longer than this is cut, so the menu header stays a header.
+const NAME_MAX_CHARS: usize = 32;
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -54,9 +67,22 @@ impl Default for Prefs {
             camera: None,
             hide_fullscreen: true,
             wake_word: false,
+            name: None,
+            theme: None,
+            feel: false,
+            remember: false,
             sound: crate::sound::Sound::default(),
         }
     }
+}
+
+/// Tidies a name: trimmed, at most NAME_MAX_CHARS characters, and None if
+/// nothing is left. Counting `chars()` (not bytes) keeps a name like
+/// "Ëmber" or "炎" from being cut in the middle of a letter.
+fn tidy_name(raw: &str) -> Option<String> {
+    let name: String = raw.trim().chars().take(NAME_MAX_CHARS).collect();
+    let name = name.trim_end().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 impl Prefs {
@@ -115,6 +141,19 @@ impl Prefs {
         if let Some(v) = flag("wakeWord") {
             prefs.wake_word = v;
         }
+        if let Some(v) = flag("feel") {
+            prefs.feel = v;
+        }
+        if let Some(v) = flag("remember") {
+            prefs.remember = v;
+        }
+        // Text keys: kept only if they're strings with something in them.
+        let text = |key: &str| saved.get(key).and_then(Value::as_str);
+        prefs.name = text("name").and_then(tidy_name);
+        prefs.theme = text("theme")
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(String::from);
         // Deserialize just these fields; a malformed one is dropped.
         let point = |key: &str| {
             saved
@@ -186,10 +225,44 @@ mod tests {
     }
 
     #[test]
+    fn the_new_keys_default_to_off_and_unnamed() {
+        let p = Prefs::default();
+        assert!(
+            !p.feel && !p.remember,
+            "nothing is read or kept unless asked"
+        );
+        assert_eq!((p.name, p.theme), (None, None));
+    }
+
+    #[test]
+    fn reads_name_theme_and_the_opt_ins() {
+        let p = Prefs::from_json(
+            r#"{ "name": "  Ember ", "theme": "burning-eye", "feel": true, "remember": true }"#,
+        );
+        assert_eq!(p.name.as_deref(), Some("Ember"));
+        assert_eq!(p.theme.as_deref(), Some("burning-eye"));
+        assert!(p.feel && p.remember);
+    }
+
+    #[test]
+    fn bad_names_and_themes_are_dropped() {
+        let p = Prefs::from_json(r#"{ "name": "   ", "theme": 7, "feel": "yes", "remember": 1 }"#);
+        assert_eq!(p, Prefs::default());
+        let long = "x".repeat(100);
+        let p = Prefs::from_json(&format!(r#"{{ "name": "{long}" }}"#));
+        assert_eq!(p.name.map(|n| n.chars().count()), Some(NAME_MAX_CHARS));
+        assert_eq!(tidy_name("炎の目").as_deref(), Some("炎の目"));
+    }
+
+    #[test]
     fn round_trips_with_js_names() {
         let p = Prefs {
             click_through: true,
             position: Some(Position { x: 1.0, y: 2.0 }),
+            name: Some("Ember".into()),
+            theme: Some("burning-eye".into()),
+            feel: true,
+            remember: true,
             ..Prefs::default()
         };
         let text = serde_json::to_string(&p).unwrap();
@@ -260,6 +333,10 @@ mod tests {
             hide_fullscreen: false,
             wake_word: true,
             sound: crate::sound::Sound::default(),
+            name: Some("Lucero".into()),
+            theme: Some("burning-eye".into()),
+            feel: true,
+            remember: true,
         };
         let text = serde_json::to_string_pretty(&p).unwrap();
         assert_eq!(Prefs::from_json(&text), p);
