@@ -32,6 +32,8 @@ Done so far:
 - "Where's my camera?" (in the tray): your monitors as they're laid out.
   Drag the camera to where your webcam sits, and the eye aims from there.
   "Look at me" fine-tunes it.
+- One copy at a time: launching it again wakes the eye. "Start with the
+  computer" in the tray adds it to Windows' per-user startup list.
 - Opening and closing. The eye eases open over 0.9 s, and fades out over
   0.6 s before it hides or quits. The window only shows after a transparent
   first frame, so there's no black box.
@@ -54,6 +56,7 @@ the menu. A left click on the tray icon shows or hides it.
 | `--mood=NAME` | Holds one of the studio's moods. |
 | `--whisper=TEXT` | Shows TEXT as a whisper once the eye opens. |
 | `--voice` | Turns the drone and spoken whispers on for this run only. |
+| `--bench-face` | Times the face model on a blank 1280x720 frame and quits. |
 | `--blind` | Starts blinded for this run only (camera and mic off), without saving it. |
 
 ```bash
@@ -66,6 +69,24 @@ they only run when asked:
 ```bash
 cargo test --release -- --ignored --nocapture
 ```
+
+## Size and memory, against Electron
+
+Measured on this PC (Windows 11, RTX 3060) on 2026-10-28, both apps idle and
+blinded (camera and mic off), 13 to 15 seconds after launch.
+
+| | Electron | Rust |
+| --- | --- | --- |
+| What ships | 356.8 MB Electron runtime + 0.5 MB of app | one 22.3 MB exe (model, font and moods inside) |
+| Processes | 5 | 1 |
+| Working set | 448.7 MB | 134.9 MB |
+| Private memory | 231.4 MB | 147.9 MB |
+
+The Rust exe was 36.5 MB with full optimisation everywhere. It's 22.3 MB
+with size-optimised code except in the face model's runtime, which still
+looks at a 1280x720 frame in 23.6 ms (`--bench-face`). Asking wgpu for small
+GPU memory blocks (`MemoryHints::MemoryUsage`) saved about 180 MB of
+private memory.
 
 ## How the window is transparent
 

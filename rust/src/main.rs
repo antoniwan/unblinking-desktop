@@ -30,6 +30,7 @@ mod placement;
 mod prefs;
 mod senses;
 mod senses_panel;
+mod session;
 mod tray;
 mod voice;
 mod whisper;
@@ -139,6 +140,8 @@ impl Args {
                 args.senses = true;
             } else if arg == "--blind" {
                 args.blind = true;
+            } else if arg == "--bench-face" {
+                // Handled before the app starts.
             } else {
                 eprintln!("ignoring unknown argument {arg:?}");
             }
@@ -242,7 +245,12 @@ impl Gpu {
             apply_limit_buckets: false,
         }))?;
         let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+            // Ask for small GPU memory blocks: the eye needs little, and the
+            // default (`Performance`) reserves big ones, about 180 MB more here.
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                ..Default::default()
+            }))?;
 
         let caps = surface.get_capabilities(&adapter);
         // Prefer a compositor that understands our premultiplied pixels.
@@ -532,6 +540,8 @@ struct App {
     spoken: usize,
     /// A whisper to put on screen once the frame's GPU work is at hand.
     pending_whisper: Option<&'static str>,
+    /// Proof this is the only copy running; another launch pokes it awake.
+    instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
     _hotkeys: Option<GlobalHotKeyManager>,
 }
@@ -934,6 +944,11 @@ impl App {
             Action::Quit => self.close(AfterClose::Quit, event_loop),
             Action::Senses => self.toggle_senses(event_loop),
             Action::WhereCamera => self.toggle_picker(event_loop),
+            Action::StartWithComputer(on) => {
+                if let Err(err) = session::set_starts_with_computer(on) {
+                    eprintln!("could not change start with the computer: {err}");
+                }
+            }
             Action::ToggleShown if self.presence.shown() => {
                 self.close(AfterClose::Hide, event_loop)
             }
@@ -973,7 +988,11 @@ impl App {
         }
         if !matches!(
             action,
-            Action::ToggleShown | Action::Quit | Action::Senses | Action::WhereCamera
+            Action::ToggleShown
+                | Action::Quit
+                | Action::Senses
+                | Action::WhereCamera
+                | Action::StartWithComputer(_)
         ) {
             self.prefs.save();
         }
@@ -1213,6 +1232,10 @@ impl ApplicationHandler for App {
         for action in actions {
             self.act(action, event_loop);
         }
+        // Launched again: show the eye (as Electron's 'second-instance').
+        if self.instance.as_ref().is_some_and(|i| i.woken()) && !self.presence.shown() {
+            self.appear();
+        }
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == HotKeyState::Pressed {
                 self.toggle_senses(event_loop);
@@ -1271,6 +1294,35 @@ fn alpha_census(rgba: &[u8]) -> (usize, usize, usize) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // --bench-face: time the face model on a blank 1280x720 frame, then quit.
+    if std::env::args().any(|a| a == "--bench-face") {
+        let mut net = YuNet::new().map_err(|e| e.to_string())?;
+        let frame = image::RgbImage::new(1280, 720);
+        net.detect(&frame); // warm up
+        let start = Instant::now();
+        for _ in 0..50 {
+            net.detect(&frame);
+        }
+        eprintln!(
+            "face model: {:.1} ms per frame",
+            start.elapsed().as_secs_f64() * 1000.0 / 50.0
+        );
+        return Ok(());
+    }
+    let args = Args::parse();
+    // One eye at a time. A second launch wakes the first and leaves. Runs
+    // with --snap are tools, so they don't take part.
+    let instance = if args.snap.is_some() {
+        None
+    } else {
+        match session::SingleInstance::claim() {
+            Some(instance) => Some(instance),
+            None => {
+                eprintln!("unblinking is already running; showing it");
+                return Ok(());
+            }
+        }
+    };
     let event_loop = EventLoop::new()?;
     // For now the mind's whispers go to the terminal; the app also notes the
     // latest one, because some moods follow what was just said.
@@ -1292,7 +1344,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .is_ok()
     });
     let now = Instant::now();
-    let args = Args::parse();
     let mut prefs = Prefs::load();
     // --blind blinds this run only; the saved pref is untouched unless the
     // menu changes something.
@@ -1334,6 +1385,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         spoken: 0,
         pending_whisper: None,
         _hotkeys: hotkeys,
+        instance,
     };
     app.voice.set_enabled(app.prefs.voice);
     event_loop.run_app(&mut app)?;

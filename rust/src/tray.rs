@@ -24,6 +24,7 @@ pub enum Action {
     Senses,
     /// Open or close "Where's my camera?".
     WhereCamera,
+    StartWithComputer(bool),
     Quit,
 }
 
@@ -40,6 +41,7 @@ pub struct Tray {
     look_at_me: MenuItem,
     senses: MenuItem,
     where_camera: MenuItem,
+    autostart: CheckMenuItem,
     quit: MenuItem,
 }
 
@@ -55,6 +57,12 @@ impl Tray {
         let look_at_me = MenuItem::new("Look at me (sit as usual, then click)", true, None);
         let senses = MenuItem::new("Blinki's Senses  (Ctrl+Alt+B)", true, None);
         let where_camera = MenuItem::new("Where's my camera?", true, None);
+        let autostart = CheckMenuItem::new(
+            "Start with the computer",
+            true,
+            crate::session::starts_with_computer(),
+            None,
+        );
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
@@ -65,6 +73,7 @@ impl Tray {
         menu.append(&whispers)?;
         menu.append(&voice)?;
         menu.append(&click_through)?;
+        menu.append(&autostart)?;
         menu.append(&where_camera)?;
         menu.append(&look_at_me)?;
         menu.append(&senses)?;
@@ -92,6 +101,7 @@ impl Tray {
             look_at_me,
             senses,
             where_camera,
+            autostart,
             quit,
         };
         tray.refresh(prefs, true);
@@ -115,6 +125,8 @@ impl Tray {
                 Action::Voice(self.voice.is_checked())
             } else if id == self.click_through.id() {
                 Action::ClickThrough(self.click_through.is_checked())
+            } else if id == self.autostart.id() {
+                Action::StartWithComputer(self.autostart.is_checked())
             } else if id == self.where_camera.id() {
                 Action::WhereCamera
             } else if id == self.senses.id() {
