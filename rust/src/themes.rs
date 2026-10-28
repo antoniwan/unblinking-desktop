@@ -27,9 +27,9 @@ pub const DEFAULT: &str = "burning-eye";
 /// (say, one being designed in the studio) is kept but not offered yet.
 const SHADERS: &[&str] = &["fire"];
 
-/// The eight moods every theme should have, in the studio's order.
+/// The nine moods every theme should have, in the studio's order.
 #[allow(dead_code)]
-pub const MOOD_NAMES: [&str; 8] = [
+pub const MOOD_NAMES: [&str; 9] = [
     "Watchful",
     "Curious",
     "Lonely",
@@ -38,6 +38,7 @@ pub const MOOD_NAMES: [&str; 8] = [
     "Suspicious",
     "Drowsy",
     "Blinded",
+    "Worried",
 ];
 
 /// One theme, as the studio exports it.

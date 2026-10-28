@@ -206,7 +206,7 @@ mod tests {
     fn the_studio_export_parses() {
         let moods = Moods::load();
         assert_eq!(moods.theme().name, "The Burning Eye");
-        assert_eq!(moods.theme.moods.len(), 8);
+        assert_eq!(moods.theme.moods.len(), 9);
         assert_eq!(moods.current().name, "Watchful");
         for name in [
             "Curious",

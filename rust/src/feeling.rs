@@ -44,6 +44,9 @@ pub struct Context {
     pub temperament: Option<Temperament>,
     /// The reading of your face, while "Read my face" is on.
     pub expression: Option<Expression>,
+    /// How long you've been up and here past midnight tonight, in seconds.
+    /// A long late night makes it worry about you.
+    pub up_late_secs: f32,
 }
 
 /// A mood and why, for Blinki's Senses. `&'static str` is text baked into
@@ -74,6 +77,8 @@ pub struct Held {
 const AWAY_CURIOUS_SECS: f32 = 8.0;
 /// Hours before this count as night (the morning end of "late").
 const MORNING_HOUR: f32 = 6.0;
+/// Up and here past midnight this long, it starts to worry (20 minutes).
+const WORRY_SECS: f32 = 20.0 * 60.0;
 
 /// The thresholds a temperament bends. With no temperament (or a neutral
 /// one) they're exactly the studio's numbers that main.rs used before.
@@ -93,6 +98,8 @@ struct Leanings {
     bedtime: f32,
     /// Quiet this long, at night, makes it drowsy.
     quiet_secs: f32,
+    /// Up past midnight this long makes it worry about you.
+    worry_secs: f32,
 }
 
 impl Leanings {
@@ -121,6 +128,9 @@ impl Leanings {
             bedtime: (23.0 + 2.0 * vigor).min(24.0),
             // and needs less quiet to doze: 60 s to 240 s.
             quiet_secs: 120.0 * 2f32.powf(vigor),
+            // A fond one worries sooner (10 to 20 min), and one already
+            // unsettled by late nights a little sooner still.
+            worry_secs: WORRY_SECS * 2f32.powf(-fond) * (1.0 + 0.25 * calm),
         }
     }
 }
@@ -168,6 +178,8 @@ pub fn choose(ctx: &Context, held: &Held) -> Choice {
         Choice::new("Suspicious", "two or more people")
     } else if said(&[Line::Loud], l.wrath_secs + l.rattled_secs) {
         Choice::new("Suspicious", "still rattled by that bang")
+    } else if ctx.up_late_secs >= l.worry_secs {
+        Choice::new("Worried", "you're up so late")
     } else if late && quiet {
         Choice::new("Drowsy", "late, and quiet for a while")
     } else if present && held.turned_away >= l.lonely_secs {
@@ -367,6 +379,7 @@ mod tests {
             crowd: 0,
             temperament: None,
             expression: None,
+            up_late_secs: 0.0,
         }
     }
 
@@ -448,6 +461,7 @@ mod tests {
                                         crowd,
                                         temperament: None,
                                         expression: None,
+                                        up_late_secs: 0.0,
                                     });
                                 }
                             }
@@ -773,5 +787,34 @@ mod tests {
         assert!(neglected.dim > look.dim && neglected.glow < look.glow);
         let junk = tint(look, &temper(f32::NAN, 0.5, 0.5, 0.0), f32::NAN);
         assert_eq!(junk, look, "junk in, no change out");
+    }
+
+    #[test]
+    fn a_long_late_night_makes_it_worry() {
+        let night = Context {
+            mode: Mode::Locked,
+            hour: 2,
+            ..calm_day()
+        };
+        assert_eq!(mood(&night), "Watchful", "a little past midnight is fine");
+        let long = Context {
+            up_late_secs: 21.0 * 60.0,
+            ..night
+        };
+        assert_eq!(mood(&long), "Worried");
+        // A fond blinki worries sooner.
+        let fond = Context {
+            up_late_secs: 12.0 * 60.0,
+            temperament: Some(temper(1.0, 0.5, 0.5, 1.0)),
+            ..night
+        };
+        assert_eq!(mood(&fond), "Worried");
+        assert_eq!(mood(&Context { temperament: None, ..fond }), "Watchful");
+        // A bang still wins over worry.
+        let bang = Context {
+            last_said: Some((Line::Loud, 0.5)),
+            ..long
+        };
+        assert_eq!(mood(&bang), "Wrathful");
     }
 }
