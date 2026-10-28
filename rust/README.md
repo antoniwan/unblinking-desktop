@@ -70,6 +70,24 @@ they only run when asked:
 cargo test --release -- --ignored --nocapture
 ```
 
+## Build the installer
+
+The installer is an NSIS setup .exe built by
+[cargo-packager](https://github.com/crabnebula-dev/cargo-packager). It
+installs for the current user, with a Start menu shortcut and an
+uninstaller. Install the tool once, then build:
+
+```bash
+cargo install cargo-packager --locked
+```
+
+```bash
+cargo packager --release
+```
+
+The setup .exe lands in `target/packager/`. The first run downloads NSIS
+itself.
+
 ## Size and memory, against Electron
 
 Measured on this PC (Windows 11, RTX 3060) on 2026-10-28, both apps idle and

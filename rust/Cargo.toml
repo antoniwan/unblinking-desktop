@@ -3,6 +3,24 @@ name = "unblinking"
 version = "0.1.0"
 edition = "2024"
 
+# The Windows installer, built with `cargo packager --release` (cargo-packager):
+# an NSIS setup .exe that installs for the current user, with a Start menu
+# shortcut and an uninstaller. Output lands in target/packager/.
+[package.metadata.packager]
+product-name = "Unblinking"
+identifier = "com.antoniwan.unblinking"
+description = "A burning eye that lives on your desktop and watches you."
+authors = ["Antonio Rodriguez Martinez"]
+publisher = "antoniwan"
+license-file = "../LICENSE"
+icons = ["assets/icon.png"]
+formats = ["nsis"]
+out-dir = "target/packager"
+before-packaging-command = "cargo build --release"
+
+[package.metadata.packager.nsis]
+install-mode = "currentUser"
+
 [dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
 cpal = "0.18.2"

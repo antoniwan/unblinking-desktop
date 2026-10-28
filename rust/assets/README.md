@@ -12,3 +12,6 @@ under the SIL Open Font License 1.1 (`Tiny5-OFL.txt`), copyright The Tiny5
 Project Authors.
 
 `blinki.json` holds the moods, exported from the Blinki Studio.
+
+`icon.png` is the app icon for the installer, the one the Electron app's
+`npm run setup` draws.
