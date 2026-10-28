@@ -104,6 +104,7 @@ impl SensesPanel {
 
         let ctx = egui::Context::default();
         ctx.set_visuals(egui::Visuals::dark());
+        ctx.set_fonts(crate::fonts::blinki());
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,

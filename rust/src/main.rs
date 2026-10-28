@@ -6,6 +6,8 @@
 //!   --backend=NAME   force `dx12` or `vulkan` instead of trying both
 //!   --senses         open Blinki's Senses at start (also Ctrl+Alt+B, or the tray)
 //!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
+//!   --whisper=TEXT   show TEXT as a whisper once the eye opens (for captures)
+//!   --voice          turn the drone and spoken whispers on for this run, without saving it
 //!   --blind          start blinded this run (camera and mic off), without saving it
 //!
 //! Left-drag moves the eye; right-click it (or the tray icon) for the menu.
@@ -18,12 +20,15 @@
 // Each `mod` line pulls in a file of the same name from src/.
 mod desktop;
 mod eye;
+mod fonts;
 mod mind;
 mod moods;
 mod prefs;
 mod senses;
 mod senses_panel;
 mod tray;
+mod voice;
+mod whisper;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -49,6 +54,8 @@ use senses::camera::Eyes;
 use senses::face::YuNet;
 use senses::mic::Ears;
 use tray::{Action, Tray};
+use voice::Voice;
+use whisper::{School, Whispers};
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -82,6 +89,8 @@ struct Args {
     blind: bool,
     mood: Option<String>,
     senses: bool,
+    voice: bool,
+    whisper: Option<String>,
 }
 
 impl Args {
@@ -92,6 +101,8 @@ impl Args {
             blind: false,
             mood: None,
             senses: false,
+            voice: false,
+            whisper: None,
         };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
@@ -110,6 +121,10 @@ impl Args {
                 };
             } else if let Some(name) = arg.strip_prefix("--mood=") {
                 args.mood = Some(name.to_string());
+            } else if let Some(text) = arg.strip_prefix("--whisper=") {
+                args.whisper = Some(text.to_string());
+            } else if arg == "--voice" {
+                args.voice = true;
             } else if arg == "--senses" {
                 args.senses = true;
             } else if arg == "--blind" {
@@ -174,6 +189,10 @@ struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     eye: Eye,
+    whispers: Whispers,
+    /// Debugging aid: with UNBLINKING_SURFACE_SNAP=MS set, the frame actually
+    /// presented at MS is copied to surface.png.
+    surface_snap: Option<Instant>,
     // Kept so another window (Blinki's Senses) can draw with the same GPU.
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -243,7 +262,8 @@ impl Gpu {
 
         let size = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | (caps.usages & wgpu::TextureUsages::COPY_SRC),
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -255,6 +275,8 @@ impl Gpu {
         };
         surface.configure(&device, &config);
         let eye = Eye::new(&device, format);
+        let whispers = Whispers::new(&device, format);
+        whispers.set_fonts(fonts::blinki());
 
         let info = adapter.get_info();
         eprintln!(
@@ -270,6 +292,11 @@ impl Gpu {
             queue,
             config,
             eye,
+            whispers,
+            surface_snap: std::env::var("UNBLINKING_SURFACE_SNAP")
+                .ok()
+                .and_then(|ms| ms.parse().ok())
+                .map(|ms| Instant::now() + Duration::from_millis(ms)),
         })
     }
 
@@ -328,7 +355,64 @@ impl Gpu {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.eye
             .draw(&self.queue, &mut encoder, &view, self.size(), state);
+        let scale = self.window.scale_factor() as f32;
+        self.whispers.draw(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &view,
+            self.size(),
+            scale,
+            state.colors,
+            state.fade,
+        );
+        let readback = self.surface_snap.filter(|t| Instant::now() >= *t).map(|_| {
+            self.surface_snap = None;
+            let (w, h) = self.size();
+            let row = (w * 4).div_ceil(256) * 256;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("surface snap"),
+                size: (row * h) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                frame.texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            (buffer, row)
+        });
         self.queue.submit([encoder.finish()]);
+        if let Some((buffer, row)) = readback {
+            let slice = buffer.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let data = slice.get_mapped_range().expect("read");
+            let (w, h) = self.size();
+            let mut rgba = Vec::new();
+            for y in 0..h as usize {
+                for px in data[y * row as usize..y * row as usize + w as usize * 4].chunks_exact(4)
+                {
+                    rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                }
+            }
+            match write_snap("surface.png", (w, h), &rgba) {
+                Ok(()) => eprintln!("surface.png written"),
+                Err(e) => eprintln!("surface snap failed: {e}"),
+            }
+        }
         self.window.pre_present_notify();
         self.queue.present(frame);
     }
@@ -429,6 +513,11 @@ struct App {
     last_startle: f64,
     /// Every whisper so far, for the Mind lens.
     whisper_log: Rc<RefCell<Vec<(Instant, Line, &'static str)>>>,
+    /// The drone and spoken whispers, and how many logged whispers it has seen.
+    voice: Voice,
+    spoken: usize,
+    /// A whisper to put on screen once the frame's GPU work is at hand.
+    pending_whisper: Option<&'static str>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
     _hotkeys: Option<GlobalHotKeyManager>,
 }
@@ -477,12 +566,18 @@ impl App {
             }
             None => (vec![], false),
         };
+        // The mic hears the speakers, so it goes deaf while the eye speaks.
+        let heard = if self.voice.speaking() {
+            0.0
+        } else {
+            self.ears.as_ref().map_or(0.0, Ears::level)
+        };
         let s = self.mind.update(
             dt,
             &Senses {
                 faces: &faces,
                 can_see,
-                level: self.ears.as_ref().map_or(0.0, Ears::level),
+                level: heard,
                 world: self.world(window),
                 blind: self.prefs.blind,
                 whispers: self.prefs.whispers,
@@ -524,8 +619,25 @@ impl App {
             self.mode = Some(s.mode);
         }
 
+        // Speak the newest whisper, if the voice is on; follow the mood's heat.
+        let latest = {
+            let log = self.whisper_log.borrow();
+            let fresh = log.len() > self.spoken;
+            self.spoken = log.len();
+            fresh
+                .then(|| log.last().map(|(_, _, text)| *text))
+                .flatten()
+        };
+        if let Some(text) = latest {
+            if self.prefs.whispers {
+                self.pending_whisper = Some(text);
+            }
+            self.voice.say(text);
+        }
+        self.voice.update(&s, dt as f32);
+
         // The mood: which of the studio's looks fits what's happening.
-        let level = self.ears.as_ref().map_or(0.0, Ears::level);
+        let level = heard;
         if !faces.is_empty() {
             self.last_face = Some(now);
         }
@@ -765,8 +877,10 @@ impl App {
                 self.set_senses(!on);
             }
             Action::Whispers(on) => self.prefs.whispers = on,
-            // Saved now; the voice itself arrives in the next milestone.
-            Action::Voice(on) => self.prefs.voice = on,
+            Action::Voice(on) => {
+                self.prefs.voice = on;
+                self.voice.set_enabled(on);
+            }
             Action::LookAtMe => {
                 // The face the camera sees now, wherever it is, becomes "sitting normally".
                 let face = self
@@ -841,8 +955,9 @@ impl App {
         }
     }
 
-    fn snap(&self, gpu: &Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
+    fn snap(&self, gpu: &mut Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
         let size = gpu.size();
+        let scale = gpu.window.scale_factor() as f32;
         let rgba = eye::read_frame(
             &gpu.device,
             &gpu.queue,
@@ -850,6 +965,18 @@ impl App {
             gpu.config.format,
             size,
             state,
+            |encoder, view| {
+                gpu.whispers.draw(
+                    &gpu.device,
+                    &gpu.queue,
+                    encoder,
+                    view,
+                    size,
+                    scale,
+                    state.colors,
+                    state.fade,
+                )
+            },
         );
         write_snap("snap.png", size, &rgba)?;
         let (clear, partial, solid) = alpha_census(&rgba);
@@ -945,13 +1072,23 @@ impl ApplicationHandler for App {
                     return;
                 };
                 let state = self.step(&gpu.window);
+                if let Some(text) = self.pending_whisper.take() {
+                    gpu.whispers
+                        .show(text, School::of_mood(&self.moods.current().name));
+                }
+                if self.presence == Presence::Open
+                    && let Some(text) = self.args.whisper.take()
+                {
+                    gpu.whispers
+                        .show(&text, School::of_mood(&self.moods.current().name));
+                }
                 gpu.render(&state);
                 // Blinki's Senses follows along, one picture per eye frame.
                 if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot) {
                     panel.draw(&gpu.device, &gpu.queue, snap);
                 }
                 if snap_due {
-                    if let Err(err) = self.snap(&gpu, &state) {
+                    if let Err(err) = self.snap(&mut gpu, &state) {
                         eprintln!("snapshot failed: {err}");
                     }
                     event_loop.exit();
@@ -1055,6 +1192,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // --blind blinds this run only; the saved pref is untouched unless the
     // menu changes something.
     prefs.blind |= args.blind;
+    prefs.voice |= args.voice;
     let mut app = App {
         args,
         gpu: None,
@@ -1085,8 +1223,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         flinch_marks: VecDeque::new(),
         last_startle: f64::NEG_INFINITY,
         whisper_log,
+        voice: Voice::new(),
+        spoken: 0,
+        pending_whisper: None,
         _hotkeys: hotkeys,
     };
+    app.voice.set_enabled(app.prefs.voice);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

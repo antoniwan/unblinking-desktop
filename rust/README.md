@@ -21,6 +21,13 @@ Done so far:
   only for now), click-through, and banish.
 - Prefs saved in Electron's own file and keys (`%APPDATA%\Unblinking\prefs.json`),
   including where you last dropped the eye.
+- Voice and whispers. The drone from voice.js is synthesised in Rust inside
+  the audio callback (detuned saws, a sub, brown-noise hiss, a breathing
+  filter). Whispers are spoken by Windows' deepest local voice. They're also
+  written under the eye in Tiny5, letter by letter, with an entrance from the
+  mood's school of magic: Pyromancy, Arcane, Umbral, Storm, Fae, Druidic,
+  Astral or Warding.
+- Blinki's Senses, a window that shows what the eye perceives (see below).
 - Opening and closing. The eye eases open over 0.9 s, and fades out over
   0.6 s before it hides or quits. The window only shows after a transparent
   first frame, so there's no black box.
@@ -38,6 +45,10 @@ the menu. A left click on the tray icon shows or hides it.
 | --- | --- |
 | `--snap=MS` | After MS milliseconds, saves the frame over a dark backdrop to `snap.png` in the current folder, then quits. |
 | `--backend=dx12` or `--backend=vulkan` | Uses only that backend. By default it tries DX12 first, then Vulkan. |
+| `--senses` | Opens Blinki's Senses at start. Ctrl+Alt+B or the tray also open it. |
+| `--mood=NAME` | Holds one of the studio's moods. |
+| `--whisper=TEXT` | Shows TEXT as a whisper once the eye opens. |
+| `--voice` | Turns the drone and spoken whispers on for this run only. |
 | `--blind` | Starts blinded for this run only (camera and mic off), without saving it. |
 
 ```bash

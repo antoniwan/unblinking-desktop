@@ -222,6 +222,8 @@ pub fn read_frame(
     format: wgpu::TextureFormat,
     size: (u32, u32),
     state: &EyeState,
+    // Anything else to draw over the eye (the whispers), into the same frame.
+    over: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
 ) -> Vec<u8> {
     let (w, h) = size;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -249,6 +251,7 @@ pub fn read_frame(
 
     let mut encoder = device.create_command_encoder(&Default::default());
     eye.draw(queue, &mut encoder, &view, size, state);
+    over(&mut encoder, &view);
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
