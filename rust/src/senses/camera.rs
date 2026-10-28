@@ -96,9 +96,11 @@ impl Drop for Eyes {
 }
 
 pub(super) fn open_camera() -> Result<Camera, nokhwa::NokhwaError> {
-    // 640x480 is all the detector needs, as in senses.js. MJPEG is what most
-    // webcams send fastest; nokhwa picks the closest format the camera has.
-    let wanted = CameraFormat::new(Resolution::new(640, 480), FrameFormat::MJPEG, 30);
+    // 1280x720: webcams usually give their whole field of view in 16:9, while
+    // 640x480 is often a tighter crop (it was on the eMeet C960), which
+    // throws off where the eye thinks you are. MJPEG is what most webcams
+    // send fastest; nokhwa picks the closest format the camera has.
+    let wanted = CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30);
     let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(wanted));
     let mut camera = Camera::new(CameraIndex::Index(0), format)?;
     camera.open_stream()?;

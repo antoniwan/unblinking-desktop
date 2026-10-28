@@ -28,6 +28,8 @@ pub struct Prefs {
     /// Speak whispers and let the eye hum. Off by default.
     pub voice: bool,
     pub position: Option<Position>,
+    /// The "Look at me" calibration, in metres (Rust app only).
+    pub look_offset: Option<Position>,
 }
 
 impl Default for Prefs {
@@ -38,6 +40,7 @@ impl Default for Prefs {
             click_through: false,
             voice: false,
             position: None,
+            look_offset: None,
         }
     }
 }
@@ -92,12 +95,16 @@ impl Prefs {
         if let Some(v) = flag("voice") {
             prefs.voice = v;
         }
-        // Deserialize just this one field; a malformed position is dropped.
-        if let Some(pos) = saved.get("position").cloned() {
-            prefs.position = serde_json::from_value::<Position>(pos)
-                .ok()
-                .filter(|p| p.x.is_finite() && p.y.is_finite());
-        }
+        // Deserialize just these fields; a malformed one is dropped.
+        let point = |key: &str| {
+            saved
+                .get(key)
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Position>(v).ok())
+                .filter(|p| p.x.is_finite() && p.y.is_finite())
+        };
+        prefs.position = point("position");
+        prefs.look_offset = point("lookOffset");
         prefs
     }
 

@@ -38,7 +38,7 @@ use eye::{Eye, EyeState};
 use std::cell::Cell;
 use std::rc::Rc;
 
-use mind::{Line, Mind, Mode, Senses, World};
+use mind::{Line, Mind, Mode, Senses, Vec2, World};
 use moods::Moods;
 use prefs::{Position, Prefs};
 use senses::Detector;
@@ -402,11 +402,13 @@ struct App {
     /// When it last saw a face, and when it last heard anything louder than quiet.
     last_face: Option<Instant>,
     last_noise: Instant,
+    /// The screen's pixels per metre, to place the eye in the room.
+    px_per_m: f64,
 }
 
 impl App {
     /// Where the cursor, the eye and its monitor are right now.
-    fn world(window: &Window) -> Option<World> {
+    fn world(&self, window: &Window) -> Option<World> {
         let cursor = desktop::cursor()?;
         let pos = window.outer_position().ok()?;
         let size = window.inner_size();
@@ -425,6 +427,11 @@ impl App {
                 height: ms.height as f64,
             },
             scale: window.scale_factor(),
+            px_per_m: self.px_per_m,
+            look_offset: self
+                .prefs
+                .look_offset
+                .map_or_else(Vec2::default, |p| Vec2::new(p.x, p.y)),
         })
     }
 
@@ -448,7 +455,7 @@ impl App {
                 faces: &faces,
                 can_see,
                 level: self.ears.as_ref().map_or(0.0, Ears::level),
-                world: Self::world(window),
+                world: self.world(window),
                 blind: self.prefs.blind,
                 whispers: self.prefs.whispers,
             },
@@ -457,6 +464,12 @@ impl App {
         // Debug heartbeat in the terminal, as app.js had: what it sees.
         if self.last_beat.elapsed() >= Duration::from_secs(3) {
             self.last_beat = now;
+            for (i, f) in faces.iter().enumerate().skip(1) {
+                eprintln!(
+                    "  also face {i}: ({:.2},{:.2}) size={:.2} score={:.2}",
+                    f.x, f.y, f.size, f.score
+                );
+            }
             let first = faces
                 .first()
                 .map(|f| {
@@ -468,10 +481,12 @@ impl App {
                 .unwrap_or_default();
             let level = self.ears.as_ref().map(Ears::level);
             eprintln!(
-                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?}",
+                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?} gaze=({:.2},{:.2})",
                 s.mode,
                 self.moods.current().name,
-                faces.len()
+                faces.len(),
+                s.gaze.x,
+                s.gaze.y
             );
         }
 
@@ -490,7 +505,11 @@ impl App {
             self.last_noise = now;
         }
         // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
-        let mood = self.args.mood.as_deref().unwrap_or_else(|| self.choose_mood(&s, &faces));
+        let mood = self
+            .args
+            .mood
+            .as_deref()
+            .unwrap_or_else(|| self.choose_mood(&s, &faces));
         self.moods.set(mood);
         let look = self.moods.now();
         self.flow = (self.flow + dt as f32 * look.flow) % 1.0;
@@ -554,7 +573,7 @@ impl App {
             "Wrathful"
         } else if said_lately(&[Line::Returned, Line::First], 4.0) {
             "Delighted"
-        } else if faces.iter().filter(|f| f.score > 0.55).count() > 1 {
+        } else if mind::crowd_size(faces) > 1 {
             "Suspicious"
         } else if late && quiet {
             "Drowsy"
@@ -610,6 +629,25 @@ impl App {
             Action::Whispers(on) => self.prefs.whispers = on,
             // Saved now; the voice itself arrives in the next milestone.
             Action::Voice(on) => self.prefs.voice = on,
+            Action::LookAtMe => {
+                // The face the camera sees now, wherever it is, becomes "sitting normally".
+                let face = self
+                    .eyes
+                    .as_mut()
+                    .and_then(|e| e.look().faces.first().copied());
+                match face {
+                    Some(face) => {
+                        let [x, y, _] = mind::face_in_room(&face);
+                        let rest = mind::REST_SEAT;
+                        self.prefs.look_offset = Some(Position {
+                            x: x - rest.x,
+                            y: y - rest.y,
+                        });
+                        eprintln!("look at me: offset {:?}", self.prefs.look_offset);
+                    }
+                    None => eprintln!("look at me: no face in view"),
+                }
+            }
             Action::ClickThrough(on) => {
                 self.prefs.click_through = on;
                 let _ = window.set_cursor_hittest(!on);
@@ -863,6 +901,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         last_said,
         last_face: None,
         last_noise: now,
+        px_per_m: {
+            let ppm = desktop::pixels_per_metre();
+            eprintln!("screen: {ppm:.0} pixels per metre");
+            ppm
+        },
     };
     event_loop.run_app(&mut app)?;
     Ok(())

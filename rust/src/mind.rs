@@ -78,14 +78,40 @@ impl Vec2 {
     }
 }
 
-/// One face the camera found: its center in the frame (0..1, mirrored as the
-/// camera sees it), its size relative to the frame, and the detector's score.
+/// One face the camera found: where its eyes are in the frame (0..1, as the
+/// camera sees it, not mirrored), its width as a fraction of the frame
+/// width, the detector's score, and the frame's width over its height.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Face {
     pub x: f64,
     pub y: f64,
     pub size: f64,
     pub score: f64,
+    pub aspect: f64,
+}
+
+/// The camera's horizontal field of view, in radians. Webcams mostly sit
+/// between 65 and 80 degrees across in 16:9.
+const CAMERA_HFOV: f64 = 70.0 * PI / 180.0;
+/// How wide a real face is, as YuNet's box measures it, in metres.
+const FACE_WIDTH_M: f64 = 0.15;
+/// Where "sitting normally" puts your eyes: straight out from the camera,
+/// a little below it. "Look at me" in the menu moves you here.
+pub const REST_SEAT: Vec2 = Vec2::new(0.0, 0.08);
+
+/// Where a face is in the room, in metres from the camera: x to the right
+/// and y down as you see the screen, and z toward you. The camera is
+/// assumed to sit at the top centre of the monitor, as most do.
+///
+/// The camera image isn't mirrored, so a face on the image's left is on
+/// your right. Distance comes from how wide the face looks.
+pub fn face_in_room(face: &Face) -> [f64; 3] {
+    let tan_h = (CAMERA_HFOV / 2.0).tan();
+    let tan_v = tan_h / face.aspect.max(0.1);
+    let dist = FACE_WIDTH_M / (face.size.max(0.02) * 2.0 * tan_h);
+    let x = (0.5 - face.x) * 2.0 * tan_h * dist;
+    let y = (face.y - 0.5) * 2.0 * tan_v * dist;
+    [x, y, dist]
 }
 
 /// Where things are on the desktop, in physical pixels.
@@ -100,6 +126,11 @@ pub struct World {
     /// pixels; the pixel constants below are multiplied by this so they
     /// mean the same distance on a high-DPI screen.
     pub scale: f64,
+    /// Screen pixels per metre, to place the eye in the room.
+    pub px_per_m: f64,
+    /// Subtracted from where faces seem to be, in metres: the "Look at me"
+    /// calibration for a camera that isn't quite where we assume.
+    pub look_offset: Vec2,
 }
 
 /// Everything the mind is told each frame (the second argument to
@@ -132,6 +163,17 @@ pub struct Frame {
 /// closure with that signature; `FnMut` means it may change its own
 /// captured state each call (for example, push onto a list).
 pub type Say = Box<dyn FnMut(&'static str, Line)>;
+
+/// A second face counts as company only if it's at least this big next to
+/// the biggest one (about the same distance from the camera).
+const CROWD_SIZE: f64 = 0.8;
+
+/// How many people are in view: confident faces near the biggest one's size.
+pub fn crowd_size(faces: &[Face]) -> usize {
+    let sure = || faces.iter().filter(|f| f.score > 0.55);
+    let biggest = sure().map(|f| f.size).fold(0.0, f64::max);
+    sure().filter(|f| f.size >= biggest * CROWD_SIZE).count()
+}
 
 /// How long the eye takes to open at launch.
 const WAKE_SECS: f64 = 0.9;
@@ -247,8 +289,12 @@ impl Mind {
         (self.say)(text, kind);
     }
 
-    /// Where a face in the camera frame sits in front of the screen, then the
-    /// direction from the eye's spot on screen to that point.
+    /// Where your eyes are in the room, then the gaze that points the pupil
+    /// from the eye's spot on the screen straight at them.
+    ///
+    /// mind.js mapped the face's spot in the image onto the screen instead.
+    /// With the eye in a top corner that aimed low, at your shoulder; this
+    /// works out the real direction.
     fn gaze_at_face(face: &Face, world: Option<&World>) -> Vec2 {
         let Some(world) = world else {
             return Vec2::new(
@@ -256,10 +302,16 @@ impl Mind {
                 clamp((0.5 - face.y) * 2.0, -1.0, 1.0),
             );
         };
+        let [ux, uy, uz] = face_in_room(face);
+        let (ux, uy) = (ux - world.look_offset.x, uy - world.look_offset.y);
+        // The eye, in metres from the camera at the top centre of its monitor.
         let d = world.display;
-        let sx = d.x + d.width * (0.5 + (0.5 - face.x) * 1.1);
-        let sy = d.y + d.height * (0.32 + (face.y - 0.5) * 0.9);
-        Self::gaze_at_point(sx, sy, world.eye, d.width * 0.9, 1.8)
+        let ex = (world.eye.x - (d.x + d.width / 2.0)) / world.px_per_m;
+        let ey = (world.eye.y - d.y) / world.px_per_m;
+        // The shader turns the pupil toward normalize(g.x * 0.85, g.y * 0.7, 1),
+        // so this is the gaze whose pupil points along (eye -> you).
+        let (vx, vy) = ((ux - ex) / uz, (uy - ey) / uz);
+        Vec2::new(clamp(vx / 0.85, -1.0, 1.0), clamp(-vy / 0.7, -1.0, 1.0))
     }
 
     /// Direction from `eye` to a point on screen, as if the point stood
@@ -344,15 +396,36 @@ impl Mind {
                 }
                 self.last_face_at = t;
 
-                // More than one face: look from one to the other.
-                let mut f = visible[0];
-                if visible.len() > 1 {
+                // Keep watching the face it was watching: the visible one
+                // nearest the last, so a stray detection can't steal the gaze.
+                // (mind.js always took the biggest.)
+                let nearest = |p: Face| {
+                    visible
+                        .iter()
+                        .copied()
+                        .min_by(|a, b| {
+                            let d = |f: &Face| (f.x - p.x).hypot(f.y - p.y);
+                            d(a).total_cmp(&d(b))
+                        })
+                        .unwrap_or(visible[0])
+                };
+                let mut f = self.face.map_or(visible[0], nearest);
+
+                // More than one face: look from one to the other. Only faces
+                // near the biggest one's size count; a small steady "face"
+                // (a photo, a hand) is not a second person.
+                let crowd: Vec<Face> = visible
+                    .iter()
+                    .copied()
+                    .filter(|c| c.size >= visible[0].size * CROWD_SIZE)
+                    .collect();
+                if crowd.len() > 1 {
                     self.whisper(Line::Crowd, 45.0);
                     if t > self.next_crowd_switch {
-                        self.crowd_index = (self.crowd_index + 1) % visible.len();
+                        self.crowd_index = (self.crowd_index + 1) % crowd.len();
                         self.next_crowd_switch = t + 1.2 + self.rng.f64() * 1.4;
                     }
-                    f = visible[self.crowd_index.min(visible.len() - 1)];
+                    f = crowd[self.crowd_index.min(crowd.len() - 1)];
                     heat_target += 0.2;
                     self.gaze_rate = 16.0;
                 } else {
@@ -366,6 +439,7 @@ impl Mind {
                         y: approach(prev.y, f.y, 12.0, dt),
                         size: approach(prev.size, f.size, 6.0, dt),
                         score: f.score,
+                        aspect: f.aspect,
                     },
                     None => f,
                 };
@@ -536,6 +610,7 @@ mod tests {
             y,
             size: 0.2,
             score: 0.9,
+            aspect: 16.0 / 9.0,
         }
     }
 
@@ -566,6 +641,8 @@ mod tests {
                 height: 1080.0,
             },
             scale: 1.0,
+            px_per_m: 4000.0, // a 1920 px wide, 48 cm wide screen
+            look_offset: Vec2::default(),
         }
     }
 
@@ -601,6 +678,114 @@ mod tests {
             ..face(0.5, 0.5)
         };
         assert_eq!(run(&mut m, 1.0, &senses(&[unsure])).mode, Mode::Hunting);
+    }
+
+    /// The eye in the top right corner of a 1920x1080 screen, you centred
+    /// in front of it. The answer should point left (toward the middle) and
+    /// down (toward your eyes, below the top edge).
+    #[test]
+    fn from_the_corner_it_looks_down_and_in_at_you() {
+        let (mut m, _) = mind();
+        let mut w = world(Point { x: 0.0, y: 0.0 });
+        w.eye = Point {
+            x: 1760.0,
+            y: 160.0,
+        };
+        // Eyes a little below the frame's middle (you sit lower than the
+        // camera on top of the screen), a face 18% of the frame wide (~60 cm away).
+        let you = Face {
+            size: 0.18,
+            ..face(0.5, 0.65)
+        };
+        let f = run(
+            &mut m,
+            2.0,
+            &Senses {
+                world: Some(w),
+                ..senses(&[you])
+            },
+        );
+        assert!(f.gaze.x < -0.3, "looks in toward you: {:?}", f.gaze);
+        assert!(f.gaze.y < -0.03, "and down: {:?}", f.gaze);
+        assert!(f.gaze.y > -0.5, "but not at your chest: {:?}", f.gaze);
+    }
+
+    #[test]
+    fn a_small_stray_face_does_not_steal_the_gaze() {
+        let (mut m, said) = mind();
+        let you = Face {
+            size: 0.13,
+            ..face(0.5, 0.6)
+        };
+        let stray = Face {
+            size: 0.09,
+            ..face(0.7, 0.9)
+        };
+        let f = run(&mut m, 4.0, &senses(&[you, stray]));
+        let alone = run(&mut mind().0, 4.0, &senses(&[you]));
+        assert!(
+            (f.gaze.x - alone.gaze.x).abs() < 0.05,
+            "{:?} vs {:?}",
+            f.gaze,
+            alone.gaze
+        );
+        assert!(!kinds(&said).contains(&Line::Crowd));
+    }
+
+    #[test]
+    fn two_people_still_make_a_crowd() {
+        let (mut m, said) = mind();
+        let a = Face {
+            size: 0.13,
+            ..face(0.3, 0.6)
+        };
+        let b = Face {
+            size: 0.12,
+            ..face(0.7, 0.6)
+        };
+        run(&mut m, 8.0, &senses(&[a, b]));
+        assert!(kinds(&said).contains(&Line::Crowd));
+    }
+
+    #[test]
+    fn leaning_right_turns_it_right() {
+        // You lean to your right: in the unmirrored camera image you move left.
+        let mut w = world(Point { x: 0.0, y: 0.0 });
+        w.eye = Point {
+            x: 1760.0,
+            y: 160.0,
+        };
+        let gaze = |x| {
+            let (mut m, _) = mind();
+            let f = Face {
+                size: 0.18,
+                ..face(x, 0.5)
+            };
+            run(
+                &mut m,
+                2.0,
+                &Senses {
+                    world: Some(w),
+                    ..senses(&[f])
+                },
+            )
+            .gaze
+        };
+        assert!(gaze(0.3).x > gaze(0.5).x + 0.2);
+    }
+
+    #[test]
+    fn a_closer_face_is_nearer_the_camera() {
+        let near = face_in_room(&Face {
+            size: 0.4,
+            ..face(0.5, 0.5)
+        });
+        let far = face_in_room(&Face {
+            size: 0.1,
+            ..face(0.5, 0.5)
+        });
+        assert!(near[2] < far[2]);
+        assert!((far[2] / near[2] - 4.0).abs() < 1e-9);
     }
 
     #[test]

@@ -68,6 +68,30 @@ pub fn work_area() -> Option<Rect> {
     })
 }
 
+/// How many of the primary screen's pixels make a metre, from the size the
+/// monitor reports for itself. Falls back to a typical desktop screen.
+#[cfg(windows)]
+pub fn pixels_per_metre() -> f64 {
+    use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, HORZRES, HORZSIZE, ReleaseDC};
+    let (px, mm) = unsafe {
+        let dc = GetDC(None);
+        let px = GetDeviceCaps(Some(dc), HORZRES);
+        let mm = GetDeviceCaps(Some(dc), HORZSIZE);
+        ReleaseDC(None, dc);
+        (px, mm)
+    };
+    if px > 0 && mm > 100 {
+        px as f64 / (mm as f64 / 1000.0)
+    } else {
+        4000.0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn pixels_per_metre() -> f64 {
+    4000.0
+}
+
 /// The hour of the day on the local clock, 0..23.
 #[cfg(windows)]
 pub fn local_hour() -> u32 {

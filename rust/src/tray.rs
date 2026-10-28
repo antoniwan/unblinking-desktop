@@ -18,6 +18,8 @@ pub enum Action {
     Whispers(bool),
     Voice(bool),
     ClickThrough(bool),
+    /// Take where you sit now as dead centre.
+    LookAtMe,
     Quit,
 }
 
@@ -31,6 +33,7 @@ pub struct Tray {
     whispers: CheckMenuItem,
     voice: CheckMenuItem,
     click_through: CheckMenuItem,
+    look_at_me: MenuItem,
     quit: MenuItem,
 }
 
@@ -43,6 +46,7 @@ impl Tray {
         let voice = CheckMenuItem::new("Voice", true, prefs.voice, None);
         let click_through =
             CheckMenuItem::new("Let clicks pass through", true, prefs.click_through, None);
+        let look_at_me = MenuItem::new("Look at me (sit as usual, then click)", true, None);
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
@@ -53,6 +57,7 @@ impl Tray {
         menu.append(&whispers)?;
         menu.append(&voice)?;
         menu.append(&click_through)?;
+        menu.append(&look_at_me)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&quit)?;
 
@@ -74,6 +79,7 @@ impl Tray {
             whispers,
             voice,
             click_through,
+            look_at_me,
             quit,
         };
         tray.refresh(prefs, true);
@@ -97,6 +103,8 @@ impl Tray {
                 Action::Voice(self.voice.is_checked())
             } else if id == self.click_through.id() {
                 Action::ClickThrough(self.click_through.is_checked())
+            } else if id == self.look_at_me.id() {
+                Action::LookAtMe
             } else if id == self.quit.id() {
                 Action::Quit
             } else {

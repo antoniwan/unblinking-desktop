@@ -35,6 +35,8 @@ struct Bbox {
     w: f32,
     h: f32,
     score: f32,
+    /// Midway between the two eyes (YuNet's first two landmarks).
+    eyes: (f32, f32),
 }
 
 pub struct YuNet {
@@ -82,15 +84,18 @@ impl YuNet {
             let cls = out[i].try_as_plain_ram()?.as_slice::<f32>()?;
             let obj = out[3 + i].try_as_plain_ram()?.as_slice::<f32>()?;
             let bbox = out[6 + i].try_as_plain_ram()?.as_slice::<f32>()?;
-            boxes.extend(decode(stride, cls, obj, bbox));
+            let kps = out[9 + i].try_as_plain_ram()?.as_slice::<f32>()?;
+            boxes.extend(decode(stride, cls, obj, bbox, kps));
         }
         let faces = nms(boxes)
             .into_iter()
+            // The eye looks at your eyes, not the middle of the box (your nose).
             .map(|b| Face {
-                x: ((b.x + b.w / 2.0) / sw as f32) as f64,
-                y: ((b.y + b.h / 2.0) / sh as f32) as f64,
+                x: (b.eyes.0 / sw as f32) as f64,
+                y: (b.eyes.1 / sh as f32) as f64,
                 size: (b.w / sw as f32) as f64,
                 score: b.score as f64,
+                aspect: fw as f64 / fh as f64,
             })
             .collect();
         Ok(faces)
@@ -108,8 +113,9 @@ impl Detector for YuNet {
 }
 
 /// Turns one stride's grid of raw outputs into scored boxes.
-/// Each cell predicts a center offset in cells and a log-scaled size.
-fn decode(stride: usize, cls: &[f32], obj: &[f32], bbox: &[f32]) -> Vec<Bbox> {
+/// Each cell predicts a center offset in cells and a log-scaled size, plus
+/// five landmarks (right eye, left eye, nose, mouth corners) as offsets.
+fn decode(stride: usize, cls: &[f32], obj: &[f32], bbox: &[f32], kps: &[f32]) -> Vec<Bbox> {
     let cols = IN_W as usize / stride;
     let s = stride as f32;
     let mut boxes = Vec::new();
@@ -122,12 +128,16 @@ fn decode(stride: usize, cls: &[f32], obj: &[f32], bbox: &[f32]) -> Vec<Bbox> {
         let b = &bbox[idx * 4..idx * 4 + 4];
         let (cx, cy) = ((col + b[0]) * s, (row + b[1]) * s);
         let (w, h) = (b[2].exp() * s, b[3].exp() * s);
+        let k = &kps[idx * 10..idx * 10 + 4];
+        let eye = |dx: f32, dy: f32| ((col + dx) * s, (row + dy) * s);
+        let (right, left) = (eye(k[0], k[1]), eye(k[2], k[3]));
         boxes.push(Bbox {
             x: cx - w / 2.0,
             y: cy - h / 2.0,
             w,
             h,
             score,
+            eyes: ((right.0 + left.0) / 2.0, (right.1 + left.1) / 2.0),
         });
     }
     boxes
@@ -169,6 +179,7 @@ mod tests {
             w,
             h: w,
             score,
+            eyes: (x + w / 2.0, y + w / 3.0),
         }
     }
 
@@ -191,10 +202,12 @@ mod tests {
         // Stride 32 on a 320-wide input: 10 columns. Cell 12 is row 1, col 2.
         let n = (IN_W as usize / 32) * (IN_H as usize / 32);
         let (mut cls, mut obj, mut bbox) = (vec![0.0; n], vec![0.0; n], vec![0.0; n * 4]);
+        let mut kps = vec![0.0; n * 10];
         cls[12] = 1.0;
         obj[12] = 1.0;
         bbox[48..52].copy_from_slice(&[0.5, 0.5, 0.0, 0.0]); // centered, one cell wide
-        let boxes = decode(32, &cls, &obj, &bbox);
+        kps[120..124].copy_from_slice(&[0.25, 0.25, 0.75, 0.25]); // eyes in the top quarter
+        let boxes = decode(32, &cls, &obj, &bbox, &kps);
         assert_eq!(
             boxes,
             vec![Bbox {
@@ -202,7 +215,8 @@ mod tests {
                 y: 32.0,
                 w: 32.0,
                 h: 32.0,
-                score: 1.0
+                score: 1.0,
+                eyes: (80.0, 40.0),
             }]
         );
     }
