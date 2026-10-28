@@ -66,8 +66,8 @@ The planned moods:
 | Lonely | Umbral |
 | Wrathful | Storm |
 | Delighted | Fae |
-| Suspicious | Astral |
-| Drowsy | Druidic |
+| Suspicious | Druidic |
+| Drowsy | Astral |
 | Blinded | Warding |
 
 ## Roadmap
