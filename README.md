@@ -78,6 +78,7 @@ All planned, none of it built yet:
 - **Moods** as described above, each with its own look and voice.
 - **Naming** your blinki.
 - **A magical pixel font** for its whispers.
+- **Feeding and temperament:** a ledger of what you do together, two clocks, traits it earns over time, and a bond that only grows.
 - **The Rust version** reaching parity and replacing Electron.
 
 ## Privacy
@@ -102,6 +103,11 @@ How the pieces talk: [docs/architecture.md](docs/architecture.md). Working on it
 ## Debug
 
 `npx electron . --snap=8000` saves `snap.png` after 8 seconds. The terminal prints what it sees and hears every 3 seconds.
+
+## Inspired by
+
+- **The Eye of Sauron**, for the very first blinki's look.
+- **Remembrance**, a system from *Milak (Lifesworn)*, antoniwan's own game. The blinki's planned feeding and temperament design (a ledger of deeds, two clocks, earned traits, and a bond that only grows) comes from it. *(planned)*
 
 ## License
 
