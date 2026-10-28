@@ -5,8 +5,8 @@
 //! it on, and follows the same rules.
 
 pub mod camera;
-pub mod face;
 pub mod expression;
+pub mod face;
 pub mod mic;
 
 use image::RgbImage;

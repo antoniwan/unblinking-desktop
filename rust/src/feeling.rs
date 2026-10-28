@@ -18,7 +18,6 @@
 //! test. `Feeling` wraps it with a little memory (how long you've smiled,
 //! how long the mood has been showing) so the eye doesn't flicker.
 
-
 use crate::mind::{Line, Mode};
 use crate::moods::Look;
 use crate::remembrance::Temperament;

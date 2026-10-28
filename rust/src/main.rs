@@ -7,6 +7,8 @@
 //!   --camera         open "Where's my camera?" at start (also in the tray)
 //!   --senses         open Blinki's Senses at start (also Ctrl+Alt+B, or the tray)
 //!   --mood=NAME      hold one of the studio's moods (for looking at it, or captures)
+//!   --demo           a scripted 14 s performance: moods, whispers, a flinch (no camera or mic)
+//!   --record=F.gif   save the frames it draws as an animated GIF, then quit when it closes
 //!   --whisper=TEXT   show TEXT as a whisper once the eye opens (for captures)
 //!   --voice          turn all sound (music, voice, effects) on for this run, without saving it
 //!   --blind          start blinded this run (camera and mic off), without saving it
@@ -20,6 +22,7 @@
 
 // Each `mod` line pulls in a file of the same name from src/.
 mod camera_picker;
+mod demo;
 mod desktop;
 mod egui_window;
 mod eye;
@@ -29,12 +32,13 @@ mod mind;
 mod moods;
 mod placement;
 mod prefs;
+mod record;
 mod remembrance;
 mod senses;
 mod senses_panel;
 mod session;
-mod themes;
 mod sound;
+mod themes;
 mod tray;
 mod voice;
 mod wellbeing;
@@ -56,19 +60,19 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use mind::{Line, Mind, Mode, Senses, Vec2, World};
 use feeling::Feeling;
+use mind::{Line, Mind, Mode, Senses, Vec2, World};
 use moods::Moods;
-use remembrance::Remembrance;
-use wellbeing::Watch;
 use prefs::{Position, Prefs};
+use remembrance::Remembrance;
 use senses::Detector;
-use senses::expression::Expression;
 use senses::camera::Eyes;
+use senses::expression::Expression;
 use senses::face::YuNet;
 use senses::mic::Ears;
 use tray::{Action, Tray};
 use voice::{Effect, Voice};
+use wellbeing::Watch;
 use whisper::{School, Whispers};
 
 use camera_picker::{CameraPicker, Picked};
@@ -108,6 +112,8 @@ struct Args {
     camera: bool,
     voice: bool,
     whisper: Option<String>,
+    demo: bool,
+    record: Option<String>,
 }
 
 impl Args {
@@ -121,6 +127,8 @@ impl Args {
             camera: false,
             voice: false,
             whisper: None,
+            demo: false,
+            record: None,
         };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
@@ -141,6 +149,10 @@ impl Args {
                 args.mood = Some(name.to_string());
             } else if let Some(text) = arg.strip_prefix("--whisper=") {
                 args.whisper = Some(text.to_string());
+            } else if arg == "--demo" {
+                args.demo = true;
+            } else if let Some(path) = arg.strip_prefix("--record=") {
+                args.record = Some(path.to_string());
             } else if arg == "--voice" {
                 args.voice = true;
             } else if arg == "--camera" {
@@ -559,6 +571,10 @@ struct App {
     pending_whisper: Option<String>,
     /// The startle the flinch effect last played for.
     last_flinch_sound: f64,
+    /// --demo's script, while it plays.
+    demo: Option<demo::Demo>,
+    /// --record's frames, written out when the app ends.
+    recording: Option<record::Recording>,
     /// Proof this is the only copy running; another launch pokes it awake.
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
@@ -622,20 +638,28 @@ impl App {
             None => (vec![], false),
         };
         // The mic hears the speakers, so it goes deaf while the eye speaks.
-        let heard = if self.voice.speaking() {
+        let heard = if let Some(demo) = &self.demo {
+            demo.level()
+        } else if self.voice.speaking() {
             0.0
         } else {
             self.ears.as_ref().map_or(0.0, Ears::level)
         };
+        // In --demo, the cursor follows the script.
+        let mut world = self.world(window);
+        if let (Some(demo), Some(w)) = (&self.demo, &mut world) {
+            w.cursor = demo.cursor(w.eye, w.scale);
+        }
         let s = self.mind.update(
             dt,
             &Senses {
                 faces: &faces,
                 can_see,
                 level: heard,
-                world: self.world(window),
-                blind: self.prefs.blind,
-                whispers: self.prefs.whispers,
+                world,
+                blind: self.prefs.blind && self.demo.is_none(),
+                // In --demo the script does the talking.
+                whispers: self.prefs.whispers && self.demo.is_none(),
             },
         );
 
@@ -753,10 +777,14 @@ impl App {
             },
         );
         // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
-        let (mood, reason) = match self.args.mood.as_deref() {
-            Some(m) => (m, "held by --mood"),
-            None => (choice.mood, choice.reason),
+        let (mood, reason) = match (self.args.mood.as_deref(), &self.demo) {
+            (Some(m), _) => (m, "held by --mood"),
+            (None, Some(demo)) => (demo.mood(), "the --demo script"),
+            (None, None) => (choice.mood, choice.reason),
         };
+        if let Some(text) = self.demo.as_mut().and_then(|d| d.whisper()) {
+            self.pending_whisper = Some(text.to_string());
+        }
         self.moods.set(mood);
         let mut look = self.moods.now();
         if let (Some(t), Some(book)) = (temperament, &self.book) {
@@ -876,7 +904,10 @@ impl App {
                 .filter(|(_, f)| **f)
                 .map(|(i, _)| i)
                 .collect(),
-            heard: self.ears.as_ref().map(Ears::level),
+            heard: match &self.demo {
+                Some(demo) => Some(demo.level()),
+                None => self.ears.as_ref().map(Ears::level),
+            },
             whispers,
             cursor: world.map(|w| w.cursor),
             eye: world.map(|w| w.eye),
@@ -1141,8 +1172,21 @@ impl App {
 
     fn snap(&self, gpu: &mut Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
         let size = gpu.size();
+        let rgba = self.grab(gpu, state);
+        write_snap("snap.png", size, &rgba)?;
+        let (clear, partial, solid) = alpha_census(&rgba);
+        eprintln!(
+            "snap.png written: {}x{}, alpha clear {clear} / partial {partial} / solid {solid} px",
+            size.0, size.1
+        );
+        Ok(())
+    }
+
+    /// The frame as drawn (eye and whispers), read back as premultiplied RGBA.
+    fn grab(&self, gpu: &mut Gpu, state: &EyeState) -> Vec<u8> {
+        let size = gpu.size();
         let scale = gpu.window.scale_factor() as f32;
-        let rgba = eye::read_frame(
+        eye::read_frame(
             &gpu.device,
             &gpu.queue,
             &gpu.eye,
@@ -1161,14 +1205,7 @@ impl App {
                     state.fade,
                 )
             },
-        );
-        write_snap("snap.png", size, &rgba)?;
-        let (clear, partial, solid) = alpha_census(&rgba);
-        eprintln!(
-            "snap.png written: {}x{}, alpha clear {clear} / partial {partial} / solid {solid} px",
-            size.0, size.1
-        );
-        Ok(())
+        )
     }
 }
 
@@ -1197,7 +1234,12 @@ impl ApplicationHandler for App {
                         self.tray = Tray::new(&self.prefs)
                             .map_err(|err| eprintln!("no tray icon: {err}"))
                             .ok();
-                        self.set_senses(!self.prefs.blind);
+                        if self.args.demo {
+                            // The script plays the senses; the camera and mic stay off.
+                            self.demo = Some(demo::Demo::new());
+                        } else {
+                            self.set_senses(!self.prefs.blind);
+                        }
                         if let Some(gpu) = &self.gpu {
                             let window = gpu.window.clone();
                             self.refresh_monitors(&window);
@@ -1286,6 +1328,18 @@ impl ApplicationHandler for App {
                         .show(&text, School::of_mood(&self.moods.current().name));
                 }
                 gpu.render(&state);
+                // --record: keep this frame, as drawn.
+                if self.recording.as_ref().is_some_and(|r| r.wants_frame()) {
+                    let size = gpu.size();
+                    let rgba = self.grab(&mut gpu, &state);
+                    if let Some(r) = &mut self.recording {
+                        r.add(size, rgba);
+                    }
+                }
+                // --demo: when the performance is over, close the eye (and quit).
+                if self.demo.as_ref().is_some_and(|d| d.done()) && self.presence == Presence::Open {
+                    self.close(AfterClose::Quit, event_loop);
+                }
                 // The camera picker too, saving each move as it's made.
                 if let Some(picker) = &mut self.picker {
                     let colors = self.moods.now().display_colors();
@@ -1506,10 +1560,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         spoken: 0,
         pending_whisper: None,
         last_flinch_sound: f64::NEG_INFINITY,
+        demo: None,
+        recording: None,
         _hotkeys: hotkeys,
         instance,
     };
     app.apply_sound();
+    app.recording = app.args.record.clone().map(record::Recording::new);
+    if app.recording.is_some() {
+        // A GIF has no sound, so a recording plays none (and saves nothing).
+        app.prefs.sound.master = false;
+        app.apply_sound();
+    }
     event_loop.run_app(&mut app)?;
+    if let Some(recording) = app.recording.take() {
+        recording.finish()?;
+    }
     Ok(())
 }
