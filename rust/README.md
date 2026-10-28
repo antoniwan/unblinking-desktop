@@ -8,8 +8,12 @@ Done so far:
 - The eye in a transparent, frameless, always-on-top window that stays off
   the taskbar. It sits in the top right of the work area. The fragment shader
   is the one from `renderer/eye.js`, compiled from GLSL by naga.
-- `src/mind.rs`, a port of `renderer/mind.js`. With no camera yet, it hunts
+- `src/mind.rs`, a port of `renderer/mind.js`. With nobody in view, it hunts
   and follows the global cursor.
+- Sight. A camera thread (nokhwa, 640x480 MJPEG) runs YuNet, a small ONNX
+  face detector, through tract (pure Rust, on the CPU) about 15 times a
+  second. When it finds you, the eye locks on. The model is built into the
+  exe, and frames stay in memory only.
 
 ## Run it
 
@@ -24,9 +28,17 @@ tray menu yet).
 | --- | --- |
 | `--snap=MS` | After MS milliseconds, saves the frame over a dark backdrop to `snap.png` in the current folder, then quits. |
 | `--backend=dx12` or `--backend=vulkan` | Uses only that backend. By default it tries DX12 first, then Vulkan. |
+| `--blind` | Keeps the camera off. The eye dims and drifts. |
 
 ```bash
 cargo test
+```
+
+Two tests need the webcam, and one of them needs a face in front of it, so
+they only run when asked:
+
+```bash
+cargo test --release -- --ignored --nocapture
 ```
 
 ## How the window is transparent
@@ -46,3 +58,6 @@ as a fallback.
 | `src/shaders/eye.frag` | The eye shader, carried over from `eye.js` |
 | `src/mind.rs` | The mind's modes, moods and whispers, plus their tests |
 | `src/desktop.rs` | The cursor position and work area, read from Windows |
+| `src/senses/camera.rs` | The camera thread and the channel that brings its reports back |
+| `src/senses/face.rs` | YuNet through tract, and the box decoding and NMS that MediaPipe used to do |
+| `assets/` | The face model and its license note |

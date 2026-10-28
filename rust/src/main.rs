@@ -4,6 +4,7 @@
 //! Flags:
 //!   --snap=MS        after MS milliseconds, save the frame to snap.png and quit
 //!   --backend=NAME   force `dx12` or `vulkan` instead of trying both
+//!   --blind          keep the camera off (the eye dims and drifts)
 
 // In release builds, don't open a console window next to the eye.
 // `cfg_attr(condition, attribute)` applies the attribute only when the
@@ -14,6 +15,7 @@
 mod desktop;
 mod eye;
 mod mind;
+mod senses;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -28,6 +30,9 @@ use winit::window::{Window, WindowId, WindowLevel};
 use desktop::{Point, Rect};
 use eye::{Eye, EyeState};
 use mind::{Mind, Mode, Senses, World};
+use senses::Detector;
+use senses::camera::Eyes;
+use senses::face::YuNet;
 
 /// Window size in logical pixels (scaled by the monitor's DPI), as in main.js.
 const WIN_SIZE: f64 = 320.0;
@@ -48,6 +53,7 @@ enum Backend {
 struct Args {
     snap: Option<Duration>,
     backend: Option<Backend>,
+    blind: bool,
 }
 
 impl Args {
@@ -55,6 +61,7 @@ impl Args {
         let mut args = Args {
             snap: None,
             backend: None,
+            blind: false,
         };
         for arg in std::env::args().skip(1) {
             // `if let` runs the block only when the pattern matches.
@@ -71,6 +78,8 @@ impl Args {
                         None
                     }
                 };
+            } else if arg == "--blind" {
+                args.blind = true;
             } else {
                 eprintln!("ignoring unknown argument {arg:?}");
             }
@@ -257,6 +266,9 @@ struct App {
     last_frame: Instant,
     mind: Mind,
     mode: Option<Mode>,
+    /// The camera thread, while the eye is allowed to see.
+    eyes: Option<Eyes>,
+    last_beat: Instant,
 }
 
 impl App {
@@ -289,18 +301,44 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f64().min(0.1);
         self.last_frame = now;
 
-        // No camera or mic yet: nobody in view, silence, cursor only.
+        // What the camera saw last. No mic yet, so it hears silence.
+        let (faces, can_see) = match &mut self.eyes {
+            Some(eyes) => {
+                let sight = eyes.look();
+                (sight.faces.clone(), sight.can_see)
+            }
+            None => (vec![], false),
+        };
         let s = self.mind.update(
             dt,
             &Senses {
-                faces: &[],
-                can_see: false,
+                faces: &faces,
+                can_see,
                 level: 0.0,
                 world: Self::world(window),
-                blind: false,
+                blind: self.args.blind,
                 whispers: true,
             },
         );
+
+        // Debug heartbeat in the terminal, as app.js had: what it sees.
+        if self.last_beat.elapsed() >= Duration::from_secs(3) {
+            self.last_beat = now;
+            let first = faces
+                .first()
+                .map(|f| {
+                    format!(
+                        " face=({:.2},{:.2}) size={:.2} score={:.2}",
+                        f.x, f.y, f.size, f.score
+                    )
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "mode={:?} sight={can_see} faces={}{first}",
+                s.mode,
+                faces.len()
+            );
+        }
 
         // A line in the terminal whenever the mood changes.
         if self.mode != Some(s.mode) {
@@ -362,6 +400,12 @@ impl ApplicationHandler for App {
                         gpu.window.set_visible(true);
                         gpu.window.request_redraw();
                         self.gpu = Some(gpu);
+                        if !self.args.blind {
+                            self.eyes = Some(Eyes::open(|| {
+                                let net = YuNet::new().map_err(|e| e.to_string())?;
+                                Ok(Box::new(net) as Box<dyn Detector>)
+                            }));
+                        }
                         return;
                     }
                     Err(err) => eprintln!("unblinking: {backend:?} failed: {err}"),
@@ -466,6 +510,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         last_frame: now,
         mind: Mind::new(say),
         mode: None,
+        eyes: None,
+        last_beat: now,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
