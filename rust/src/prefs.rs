@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_ignored() {
-        let p = Prefs::from_json(r#"{ "whispers": false, "theme": "dark", "future": [1, 2] }"#);
+        let p = Prefs::from_json(r#"{ "whispers": false, "colour": "dark", "future": [1, 2] }"#);
         let want = Prefs {
             whispers: false,
             ..Prefs::default()

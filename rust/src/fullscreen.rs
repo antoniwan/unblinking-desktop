@@ -347,13 +347,12 @@ mod tests {
 
     #[test]
     fn every_pout_mood_exists() {
-        let json: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/blinki.json")).unwrap();
-        let names: Vec<&str> = json["moods"]
-            .as_array()
-            .unwrap()
+        let moods = crate::moods::Moods::load();
+        let names: Vec<&str> = moods
+            .theme()
+            .moods
             .iter()
-            .filter_map(|m| m["name"].as_str())
+            .map(|m| m.name.as_str())
             .collect();
         for (line, mood) in POUTS {
             assert!(names.contains(mood), "no mood {mood}");

@@ -369,13 +369,12 @@ mod tests {
     fn every_studio_mood_but_watchful_has_its_own_school() {
         // If the studio renames a mood, it would quietly fall back to
         // Pyromancy; this catches that.
-        let json: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/blinki.json")).unwrap();
-        let names: Vec<&str> = json["moods"]
-            .as_array()
-            .unwrap()
+        let moods = crate::moods::Moods::load();
+        let names: Vec<&str> = moods
+            .theme()
+            .moods
             .iter()
-            .filter_map(|m| m["name"].as_str())
+            .map(|m| m.name.as_str())
             .collect();
         assert!(!names.is_empty());
         for name in names.into_iter().filter(|&n| n != "Watchful") {
