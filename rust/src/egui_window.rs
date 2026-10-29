@@ -219,17 +219,17 @@ impl EguiWindow {
                 (buffer, row, name)
             });
         queue.submit(extra.into_iter().chain([encoder.finish()]));
-        if let Some((buffer, row, name)) = readback {
-            if let Err(err) = save_png(
+        if let Some((buffer, row, name)) = readback
+            && let Err(err) = save_png(
                 device,
                 &buffer,
                 row,
                 (self.config.width, self.config.height),
                 self.config.format,
                 &name,
-            ) {
-                eprintln!("window snap failed: {err}");
-            }
+            )
+        {
+            eprintln!("window snap failed: {err}");
         }
         self.window.pre_present_notify();
         queue.present(frame);
@@ -255,7 +255,11 @@ fn save_png(
     );
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h as usize {
-        for px in data[y * row as usize..y * row as usize + w as usize * 4].chunks_exact(4) {
+        // `as_chunks::<4>()` views the bytes as whole 4-byte pixels.
+        for px in data[y * row as usize..y * row as usize + w as usize * 4]
+            .as_chunks::<4>()
+            .0
+        {
             rgb.extend_from_slice(&if bgra {
                 [px[2], px[1], px[0]]
             } else {
