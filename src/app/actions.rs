@@ -36,7 +36,7 @@ impl App {
     /// Opens Blinki's Senses, or closes it (which also stops the camera preview).
     pub(super) fn toggle_senses(&mut self, event_loop: &ActiveEventLoop) {
         if self.panel.take().is_some() {
-            self.snapshot = None;
+            self.history.snapshot = None;
             if let Some(eyes) = &mut self.eyes {
                 eyes.set_preview(false);
             }
@@ -116,7 +116,7 @@ impl App {
                 self.prefs.save();
                 if self.prefs.whispers {
                     const DEAF: &str = "I can't hear names on this computer yet.";
-                    self.pending_whisper = Some(DEAF.to_string());
+                    self.whispers.pending = Some(DEAF.to_string());
                     self.voice.say(DEAF);
                 }
             }

@@ -1,7 +1,7 @@
 //! One frame of the eye: senses -> mind -> feeling -> motion -> uniforms,
 //! and what Blinki's Senses shows of it.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use winit::window::Window;
 
@@ -14,14 +14,13 @@ use crate::mind::{self, Senses};
 use crate::platform::desktop::{self};
 use crate::render::eye::EyeState;
 use crate::senses::mic::Ears;
-use crate::ui::senses_panel::{LEVEL_HISTORY, Snapshot};
+use crate::ui::senses_panel::Snapshot;
 
 impl App {
     /// Advances the mind one frame and turns its mood into the eye's uniforms.
     pub(super) fn step(&mut self, window: &Window) -> EyeState {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f64().min(0.1);
-        self.last_frame = now;
+        let dt = self.clock.tick(now);
 
         // What the camera saw and the mic heard last.
         let (faces, can_see) = match &mut self.eyes {
@@ -59,12 +58,8 @@ impl App {
             },
         );
 
-        // Debug heartbeat in the terminal, as app.js had: what it sees.
-        self.frames += 1;
-        if self.last_beat.elapsed() >= Duration::from_secs(3) {
-            let fps = self.frames as f64 / self.last_beat.elapsed().as_secs_f64();
-            self.frames = 0;
-            self.last_beat = now;
+        // Debug heartbeat in the terminal, as the Electron app had: what it sees.
+        if let Some(fps) = self.clock.beat(now) {
             for (i, f) in faces.iter().enumerate().skip(1) {
                 eprintln!(
                     "  also face {i}: ({:.2},{:.2}) size={:.2} score={:.2}",
@@ -98,17 +93,9 @@ impl App {
         }
 
         // Speak the newest whisper, if the voice is on; follow the mood's heat.
-        let latest = {
-            let log = self.whisper_log.borrow();
-            let fresh = log.len() > self.spoken;
-            self.spoken = log.len();
-            fresh
-                .then(|| log.last().map(|(_, _, text)| *text))
-                .flatten()
-        };
-        if let Some(text) = latest {
+        if let Some(text) = self.whispers.fresh() {
             if self.prefs.whispers {
-                self.pending_whisper = Some(text.to_string());
+                self.whispers.pending = Some(text.to_string());
             }
             self.voice.say(text);
         }
@@ -122,12 +109,7 @@ impl App {
 
         // The mood: which of the studio's looks fits what's happening.
         let level = heard;
-        if !faces.is_empty() {
-            self.last_face = Some(now);
-        }
-        if level > 0.3 {
-            self.last_noise = now;
-        }
+        self.company.notice(now, !faces.is_empty(), level);
         // Your face, if you let it read it (None otherwise).
         let expression = self.expression;
 
@@ -148,22 +130,13 @@ impl App {
                 eprintln!("remembered a first: {}", first.line);
                 if self.prefs.whispers {
                     self.voice.say(&first.line);
-                    self.pending_whisper = Some(first.line);
+                    self.whispers.pending = Some(first.line);
                 }
             }
         }
-        // Up late: time here (face, or input in the last 30 s) after
-        // midnight. Five minutes away, or morning, starts it over.
+        // Here: a face, or keyboard/mouse input in the last 30 s.
         let here = !faces.is_empty() || desktop::idle_secs().is_some_and(|i| i < 30.0);
-        if here {
-            self.last_here = now;
-        }
-        let small_hours = desktop::local_hour() < LATE_UNTIL_HOUR;
-        if !small_hours || self.last_here.elapsed() > Duration::from_secs(300) {
-            self.up_late = 0.0;
-        } else if here {
-            self.up_late += dt as f32;
-        }
+        self.late.track(now, here, desktop::local_hour(), dt as f32);
 
         let now_unix = remembrance::unix_now();
         let temperament = self.book.as_ref().map(|b| b.temperament(now_unix));
@@ -172,37 +145,27 @@ impl App {
             dt as f32,
             &feeling::Context {
                 mode: s.mode,
-                last_said: self
-                    .last_said
-                    .get()
-                    .map(|(kind, at)| (kind, at.elapsed().as_secs_f32())),
-                no_face_secs: self
-                    .last_face
-                    .map_or(self.started.elapsed(), |t| t.elapsed())
-                    .as_secs_f32(),
+                last_said: self.whispers.last_said(),
+                no_face_secs: self.company.no_face_for().as_secs_f32(),
                 hour: desktop::local_hour(),
-                quiet_secs: self.last_noise.elapsed().as_secs_f32(),
+                quiet_secs: self.company.quiet_for().as_secs_f32(),
                 too_close: faces.iter().any(|f| f.score > 0.55 && f.size > 0.5),
                 crowd: mind::crowd_size(&faces),
                 temperament,
                 expression,
-                up_late_secs: self.up_late,
+                up_late_secs: self.late.secs(),
             },
         );
         // Worried: tell you to rest, gently, at most twice an hour.
         // It gets more insistent the later it gets (feeling::worry).
-        let worry = feeling::worry(self.up_late);
-        if choice.mood == "Worried"
-            && self
-                .last_worry
-                .is_none_or(|t| t.elapsed().as_secs_f32() > worry.every_secs)
-        {
-            self.last_worry = Some(now);
+        let worry = feeling::worry(self.late.secs());
+        // `&&` stops at the first false, so the clock only resets on Worried.
+        if choice.mood == "Worried" && self.late.time_to_worry(now, worry.every_secs) {
             let line = worry.lines[fastrand::usize(..worry.lines.len())];
             eprintln!("worried: {line}");
             if self.prefs.whispers {
                 self.voice.say(line);
-                self.pending_whisper = Some(line.to_string());
+                self.whispers.pending = Some(line.to_string());
             }
         }
         // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
@@ -224,11 +187,8 @@ impl App {
             match text.1 {
                 // Logged like the mind's own, so Blinki's Senses lists it;
                 // the log puts it on screen (and speaks it) next frame.
-                Some(kind) => self
-                    .whisper_log
-                    .borrow_mut()
-                    .push((Instant::now(), kind, text.0)),
-                None => self.pending_whisper = Some(text.0.to_string()),
+                Some(kind) => self.whispers.log(kind, text.0),
+                None => self.whispers.pending = Some(text.0.to_string()),
             }
         }
         self.moods.set(mood);
@@ -308,15 +268,7 @@ impl App {
         window: &Window,
     ) {
         let insight = self.mind.insight();
-        // A new startle time means it flinched this frame.
-        let flinched = insight.last_startle > self.last_startle;
-        self.last_startle = insight.last_startle;
-        self.levels.push_back(level as f32);
-        self.flinch_marks.push_back(flinched);
-        while self.levels.len() > LEVEL_HISTORY {
-            self.levels.pop_front();
-            self.flinch_marks.pop_front();
-        }
+        self.history.record(level, insight.last_startle);
         let (detections, can_see, picture) = match &mut self.eyes {
             Some(eyes) => {
                 let sight = eyes.look();
@@ -339,13 +291,8 @@ impl App {
             [x as f32, y as f32]
         });
         let world = self.world(window);
-        let whispers = self
-            .whisper_log
-            .borrow()
-            .iter()
-            .map(|(at, kind, text)| (insight.t - at.elapsed().as_secs_f64(), *kind, *text))
-            .collect();
-        self.snapshot = Some(Snapshot {
+        let whispers = self.whispers.timeline(insight.t);
+        self.history.snapshot = Some(Snapshot {
             frame: *s,
             drawn_gaze: state.gaze,
             mood: self.moods.current().name.clone(),
@@ -358,14 +305,8 @@ impl App {
             demo: self.demo.is_some(),
             picture,
             rest_in_picture,
-            levels: self.levels.clone(),
-            flinches: self
-                .flinch_marks
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| **f)
-                .map(|(i, _)| i)
-                .collect(),
+            levels: self.history.levels(),
+            flinches: self.history.flinches(),
             heard: match &self.demo {
                 Some(demo) => Some(demo.level()),
                 None => self.ears.as_ref().map(Ears::level),

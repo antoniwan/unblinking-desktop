@@ -273,7 +273,8 @@ impl Gpu {
 /// else in the top right corner of the primary monitor's work area.
 fn window_attributes(
     event_loop: &ActiveEventLoop,
-    backend: Backend,
+    // Only the Windows block below reads it; elsewhere it's unused on purpose.
+    #[cfg_attr(not(windows), allow(unused_variables))] backend: Backend,
     prefs: &Prefs,
 ) -> winit::window::WindowAttributes {
     let scale = event_loop

@@ -30,16 +30,13 @@ impl App {
         if let Some(eyes) = &self.eyes {
             eyes.set_resting(hidden);
         }
-        let no_face_for = self
-            .last_face
-            .map_or(self.started.elapsed(), |t| t.elapsed());
         let p = pacing::Pacing {
             shown: self.presence.shown(),
             fading: matches!(self.presence, Presence::Opening(_) | Presence::Closing(..)),
             blind: self.prefs.blind,
             calm: self.mode == Some(Mode::Hunting)
-                && no_face_for >= pacing::CALM_AFTER
-                && self.last_noise.elapsed() >= pacing::CALM_AFTER,
+                && self.company.no_face_for() >= pacing::CALM_AFTER
+                && self.company.quiet_for() >= pacing::CALM_AFTER,
             egui_open: self.panel.is_some() || self.picker.is_some(),
         };
         let now = Instant::now();
@@ -49,12 +46,12 @@ impl App {
             if let Some(eyes) = &mut self.eyes {
                 eyes.look();
             }
-            self.next_frame = now;
+            self.clock.next_frame = now;
             event_loop.set_control_flow(ControlFlow::WaitUntil(now + pacing::HIDDEN_TICK));
             return;
         };
-        if now >= self.next_frame {
-            self.next_frame = pacing::next_due(self.next_frame, now, interval);
+        if now >= self.clock.next_frame {
+            self.clock.next_frame = pacing::next_due(self.clock.next_frame, now, interval);
             if let Some(gpu) = &self.gpu {
                 if hidden {
                     // A hidden window gets no redraw events from Windows,
@@ -66,7 +63,7 @@ impl App {
                 }
             }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.clock.next_frame));
     }
 }
 
@@ -177,7 +174,7 @@ impl ApplicationHandler for App {
                     return;
                 };
                 let state = self.step(&gpu.window);
-                if let Some(text) = self.pending_whisper.take() {
+                if let Some(text) = self.whispers.pending.take() {
                     self.voice.effect(Effect::Chime);
                     gpu.whispers
                         .show(&text, School::of_mood(&self.moods.current().name));
@@ -233,7 +230,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 // Blinki's Senses follows along, one picture per eye frame.
-                if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot)
+                if let (Some(panel), Some(snap)) = (&mut self.panel, &self.history.snapshot)
                     && let Some(sound) = panel.draw(&gpu.device, &gpu.queue, snap)
                 {
                     self.prefs.sound = sound;

@@ -1,7 +1,8 @@
 //! The whole app: one `App` that winit calls into. Split by job:
 //! `frame` (one frame of the eye), `actions` (menu and windows),
 //! `presence` (opening and closing), `events` (winit's callbacks),
-//! `capture` (frames read back for --snap and --record).
+//! `capture` (frames read back for --snap and --record), `pacing` (how
+//! often it draws), and `state` (the small structs `App` is built from).
 
 mod actions;
 mod capture;
@@ -9,12 +10,11 @@ mod events;
 mod frame;
 mod pacing;
 mod presence;
+mod state;
 
 use presence::{AfterClose, Presence};
+use state::{Company, FrameClock, LateNight, SensesHistory, WhisperBook};
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use global_hotkey::GlobalHotKeyManager;
@@ -29,7 +29,7 @@ use crate::cli::Args;
 use crate::mind::feeling::Feeling;
 use crate::mind::moods::Moods;
 use crate::mind::motion;
-use crate::mind::{self, Line, Mind, Mode, Vec2, World};
+use crate::mind::{Mind, Mode, Vec2, World};
 use crate::platform::desktop::{self, Point, Rect};
 use crate::platform::fullscreen;
 use crate::platform::session;
@@ -43,7 +43,7 @@ use crate::senses::placement::{self, Monitor};
 use crate::senses::wake::Wake;
 use crate::tools::{demo, record};
 use crate::ui::camera_picker::CameraPicker;
-use crate::ui::senses_panel::{SensesPanel, Snapshot};
+use crate::ui::senses_panel::SensesPanel;
 
 /// The eye sits a little above center so whispers fit below it.
 const CENTER: [f32; 2] = [0.0, 0.06];
@@ -51,18 +51,12 @@ const CENTER: [f32; 2] = [0.0, 0.06];
 const SAVE_MOVE_AFTER: Duration = Duration::from_millis(400);
 
 /// The whole app. winit calls into it through `ApplicationHandler`.
-/// Hours after midnight before this count as the small hours.
-const LATE_UNTIL_HOUR: u32 = 5;
-
 pub(crate) struct App {
     args: Args,
     gpu: Option<Gpu>,
     started: Instant,
-    last_frame: Instant,
-    /// When the next frame is due (see pacing.rs), and frames drawn since
-    /// the last heartbeat line, to print the frame rate.
-    next_frame: Instant,
-    frames: u32,
+    /// The time between frames, and when the next one is due.
+    clock: FrameClock,
     mind: Mind,
     /// The body that carries out the mind's wishes: weight, breath, flinch.
     motion: motion::Motion,
@@ -78,7 +72,6 @@ pub(crate) struct App {
     presence: Presence,
     /// When to save the window's spot, a moment after the last move.
     save_move_at: Option<Instant>,
-    last_beat: Instant,
     moods: Moods,
     /// Picks the mood from the moment, your face and its temperament.
     feeling: Feeling,
@@ -90,46 +83,30 @@ pub(crate) struct App {
     expression: Option<Expression>,
     /// The flame drift's looping phase, 0..1, advanced at the mood's speed.
     flow: f32,
-    /// The latest whisper and when, shared with the mind's `say` closure.
-    /// `Rc<Cell<..>>`: both own it (Rc), and a Copy value inside a Cell can
-    /// be swapped even through a shared handle.
-    last_said: Rc<Cell<Option<(Line, Instant)>>>,
+    /// What it has whispered, spoken, and has yet to show.
+    whispers: WhisperBook,
     /// When it last saw a face, and when it last heard anything louder than quiet.
-    last_face: Option<Instant>,
-    last_noise: Instant,
+    company: Company,
     /// The screen's pixels per metre, to place the eye in the room.
     px_per_m: f64,
-    /// Blinki's Senses, while it's open, and what it shows.
+    /// Blinki's Senses, while it's open.
     panel: Option<SensesPanel>,
     /// "Where's my camera?", while it's open.
     picker: Option<CameraPicker>,
     /// The monitors as they're laid out, for placing the camera.
     monitors: Vec<Monitor>,
-    snapshot: Option<Snapshot>,
-    levels: VecDeque<f32>,
-    /// One flag per entry in `levels`: did it flinch on that frame?
-    flinch_marks: VecDeque<bool>,
-    last_startle: f64,
-    /// Every whisper so far, for the Mind lens.
-    #[allow(clippy::type_complexity)]
-    whisper_log: Rc<RefCell<Vec<(Instant, Line, &'static str)>>>,
-    /// The drone and spoken whispers, and how many logged whispers it has seen.
+    /// What Blinki's Senses shows, and its recent history.
+    history: SensesHistory,
+    /// The drone and spoken whispers.
     voice: Voice,
-    spoken: usize,
-    /// A whisper to put on screen once the frame's GPU work is at hand.
-    pending_whisper: Option<String>,
     /// The startle the flinch effect last played for.
     last_flinch_sound: f64,
     /// --demo's script, while it plays.
     demo: Option<demo::Demo>,
     /// --record's frames, written out when the app ends.
     recording: Option<record::Recording>,
-    /// Seconds you've been up and here past midnight tonight, and when you
-    /// were last here (face or keyboard/mouse), for the Worried mood.
-    up_late: f32,
-    last_here: Instant,
-    /// When it last told you to rest, so it doesn't nag.
-    last_worry: Option<Instant>,
+    /// How long you've been up past midnight, for the Worried mood.
+    late: LateNight,
     /// Proof this is the only copy running; another launch pokes it awake.
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
@@ -142,17 +119,9 @@ impl App {
     /// Builds the app: loads the prefs (with this run's flags on top), the
     /// moods, what it remembers, and the mind with its whisper log.
     pub(crate) fn new(args: Args, instance: Option<session::SingleInstance>) -> App {
-        // For now the mind's whispers go to the terminal; the app also notes the
-        // latest one, because some moods follow what was just said.
-        let last_said = Rc::new(Cell::new(None));
-        let heard = Rc::clone(&last_said);
-        let whisper_log = Rc::new(RefCell::new(Vec::new()));
-        let log = Rc::clone(&whisper_log);
-        let say: mind::Say = Box::new(move |text, kind| {
-            eprintln!("whisper ({kind:?}): {text}");
-            heard.set(Some((kind, Instant::now())));
-            log.borrow_mut().push((Instant::now(), kind, text));
-        });
+        // The mind whispers through `say`, which notes each line in `whispers`.
+        let whispers = WhisperBook::new();
+        let say = whispers.say();
         // Ctrl+Alt+B opens Blinki's Senses from anywhere. If another app has
         // the shortcut, the tray item still works.
         let hotkeys = GlobalHotKeyManager::new().ok().filter(|m| {
@@ -184,9 +153,7 @@ impl App {
             args,
             gpu: None,
             started: now,
-            last_frame: now,
-            next_frame: now,
-            frames: 0,
+            clock: FrameClock::new(now),
             mind: Mind::new(say),
             motion: motion::Motion::new(),
             mode: None,
@@ -197,16 +164,14 @@ impl App {
             tray: None,
             presence: Presence::Hidden,
             save_move_at: None,
-            last_beat: now,
             moods,
             feeling: Feeling::new(),
             book,
             watch: Watch::new(),
             expression: None,
             flow: 0.0,
-            last_said,
-            last_face: None,
-            last_noise: now,
+            whispers,
+            company: Company::new(now),
             px_per_m: {
                 let ppm = desktop::pixels_per_metre();
                 eprintln!("screen: {ppm:.0} pixels per metre");
@@ -215,20 +180,12 @@ impl App {
             panel: None,
             picker: None,
             monitors: Vec::new(),
-            snapshot: None,
-            levels: VecDeque::new(),
-            flinch_marks: VecDeque::new(),
-            last_startle: f64::NEG_INFINITY,
-            whisper_log,
+            history: SensesHistory::new(),
             voice: Voice::new(),
-            spoken: 0,
-            pending_whisper: None,
             last_flinch_sound: f64::NEG_INFINITY,
             demo: None,
             recording: None,
-            up_late: 0.0,
-            last_here: now,
-            last_worry: None,
+            late: LateNight::new(now),
             _hotkeys: hotkeys,
             instance,
             fullscreen: fullscreen::Watcher::new(),

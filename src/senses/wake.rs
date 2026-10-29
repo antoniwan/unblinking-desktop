@@ -16,6 +16,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 #[derive(Clone, Debug, PartialEq)]
 pub enum WakeEvent {
     /// Someone said a wake phrase. Carries the words, for the log.
+    /// Only the Windows recognizer sends it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Heard(String),
     /// The recognizer could not start or stopped for good, and why.
     /// The app turns the feature off and says so once.

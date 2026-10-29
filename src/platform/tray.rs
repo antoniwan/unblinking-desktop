@@ -78,6 +78,8 @@ fn header(prefs: &Prefs) -> String {
 pub struct Tray {
     // Kept so the icon stays in the tray; dropping it removes the icon.
     icon: TrayIcon,
+    // Read only by the Windows right-click popup (see `popup`).
+    #[cfg_attr(not(windows), allow(dead_code))]
     menu: Menu,
     status: MenuItem,
     shown: MenuItem,
