@@ -51,7 +51,9 @@ The eye sees you from the camera's spot but looks at you from its own, so it nee
 - **Whispers** under the eye in the Tiny5 pixel font, spoken aloud if you like by Windows' own local voice.
 - **A sound mixer**: Music (a live-synthesised drone), Voice, and Effects (a deep whoomp at a bang, a chime with each whisper), each with its own switch and volume, under one master.
 - **Themes, feelings and Remembrance**, as above. Reading your expression is opt-in and off by default.
-- **A tray menu** (also on right-click of the eye): hide, blind, whispers, Sound, click-through, start with the computer, Theme, Read my face, Remember our days, Forget our days, Blinki's Senses, Where's my camera?, Look at me, Banish.
+- **A tray menu** (also on right-click of the eye): hide, blind, whispers, Sound, click-through, hide when something's full screen, the wake word, start with the computer, Theme, Read my face, Remember our days, Forget our days, Blinki's Senses, Where's my camera?, Look at me, Banish.
+- **It gets out of the way.** Start a full-screen game, video or presentation, and it closes and hides, then fades back in, pouting, when you return.
+- **"Hey, OG Blinki"**: an opt-in wake word, matched on the computer by Windows' own speech recognizer, with no cloud. Off by default.
 - **One copy at a time.** Launching it again just wakes the eye.
 - **A per-user installer** with a Start menu shortcut and an uninstaller.
 
@@ -69,7 +71,7 @@ Measured on this PC (Windows 11, RTX 3060), with both apps idle and blinded, aga
 
 | | Electron | Rust |
 | --- | --- | --- |
-| What ships | 356.8 MB runtime + 0.5 MB of app | one exe, models and font inside (22.3 MB as measured; 27.4 MB now that the 4.8 MB expression model is in) |
+| What ships | 356.8 MB runtime + 0.5 MB of app | one exe, models and font inside (22.3 MB as measured; 27.5 MB now, with the 4.8 MB expression model and the new sphere) |
 | Installer | (none) | 7.6 MB setup |
 | Processes | 5 | 1 |
 | Working set | 448.7 MB | 134.9 MB |
@@ -78,9 +80,9 @@ Measured on this PC (Windows 11, RTX 3060), with both apps idle and blinded, aga
 
 ## Under the hood
 
-- **Rust** throughout, about 117 tests (`cargo test`), with the Electron code kept for reference until the switch-over.
+- **Rust** throughout, 168 tests (`cargo test`), checked on Windows CI with clippy and formatting, with the Electron code kept for reference until the switch-over.
 - **winit 0.30 + wgpu 30.** The eye is one fragment shader. For a transparent window on Windows, DX12 presents through a **DirectComposition** swapchain with **premultiplied alpha** (a plain swapchain can't be see-through), with Vulkan as a fallback. A transparent first frame means it never flashes a black box.
-- **The shader** is GLSL, compiled for DX12 or Vulkan by **naga**. The fire is 3D noise sampled on the sphere's surface, so it wraps with the ball, with a hotter inner layer seen through its veins and a solid pupil.
+- **The shader** is GLSL, compiled for DX12 or Vulkan by **naga**. The body is raymarched: a signed-distance sphere with layered fire inside, a hotter core seen through its veins, and a solid pupil. Around it sits a layered aura: rim bloom, halo, corona, tongues of light and curling embers. A small motion layer gives the mind's wishes a body (breath, gaze velocity, a wince). Frame pacing keeps it light when nothing's changing.
 - **Face detection**: YuNet (ONNX), run by **tract**, a pure-Rust inference engine, on its own camera thread (**nokhwa**). The box decoding and non-maximum suppression are written by hand.
 - **Sound**: **cpal** streams in both directions. The drone and the effects are synthesised sample by sample in the audio callback, without allocating, steered through atomics. Speech uses the system voice via **tts**.
 - **egui** (on the same wgpu device) draws the whispers, Blinki's Senses and the camera picker. **tray-icon + muda** do the menu, **global-hotkey** the shortcut, and **serde** the prefs (shared with the Electron app's `prefs.json`).

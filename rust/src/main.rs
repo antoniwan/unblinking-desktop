@@ -1681,8 +1681,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let args = Args::parse();
     // One eye at a time. A second launch wakes the first and leaves. Runs
-    // with --snap are tools, so they don't take part.
-    let instance = if args.snap.is_some() {
+    // with --snap, --record or --demo are tools, so they don't take part.
+    let instance = if args.snap.is_some() || args.record.is_some() || args.demo {
         None
     } else {
         match session::SingleInstance::claim() {
