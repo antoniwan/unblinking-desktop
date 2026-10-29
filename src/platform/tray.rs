@@ -1,4 +1,4 @@
-//! The tray icon and its menu, the Rust side of buildMenu() in main.js.
+//! The tray icon and its menu, first ported from the Electron app's buildMenu().
 //! The same menu also pops up when you right-click the eye.
 
 use std::error::Error;
@@ -339,7 +339,7 @@ impl Tray {
             }
         }
         #[cfg(not(windows))]
-        let _ = window; // Mac: the menu bar icon is the way in, as in main.js.
+        let _ = window; // Mac: the menu bar icon is the way in, as in the Electron app.
     }
 }
 

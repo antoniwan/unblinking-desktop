@@ -1,5 +1,5 @@
 //! The voice: a low drone under the fire, sound effects, and whispers spoken
-//! aloud. The Rust side of renderer/voice.js, plus effects it never had.
+//! aloud. Ported from the Electron app's voice.js (tag v0.1.0), plus effects it never had.
 //! The drone and the effects are synthesised here, sample by sample, in one
 //! audio stream; speech uses the system's own local voices. No audio files,
 //! nothing fetched. Each of the three is its own channel (see sound.rs).
@@ -25,7 +25,7 @@ const REST_CUTOFF: f32 = 140.0;
 const PEAK_CUTOFF: f32 = 900.0;
 // The effects' loudness at full volume; also well under talking.
 const FX_GAIN: f32 = 0.09;
-// Speech volume at full Voice volume, as voice.js had.
+// Speech volume at full Voice volume, as the Electron app had.
 const SPEECH_VOLUME: f32 = 0.6;
 // The room keeps ringing a moment after the voice stops.
 const SPEECH_TAIL: Duration = Duration::from_millis(600);
@@ -509,7 +509,7 @@ impl Voice {
 }
 
 /// The system speech engine with the deepest local voice it has, slowed
-/// and lowered like voice.js did (Web Speech and this crate share scales).
+/// and lowered like the Electron app did (Web Speech and this crate share scales).
 fn open_speech() -> Result<tts::Tts, String> {
     let mut tts = tts::Tts::default().map_err(|e| e.to_string())?;
     if let Ok(voices) = tts.voices() {

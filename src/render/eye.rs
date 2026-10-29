@@ -1,9 +1,9 @@
 //! The eye itself: one full-window triangle and one fragment shader,
-//! drawn with wgpu. This is the Rust side of renderer/eye.js.
+//! drawn with wgpu. Ported from the Electron app's eye.js (tag v0.1.0).
 
 use std::borrow::Cow;
 
-/// What the eye looks like this frame. Same fields as `eye.render(s)` in eye.js.
+/// What the eye looks like this frame. Same fields as the Electron app's `eye.render(s)`.
 ///
 /// `#[derive(Clone, Copy)]` lets a value be copied bit for bit instead of
 /// *moved*. Rust normally moves values (the old variable can't be used

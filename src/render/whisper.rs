@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use egui::{Color32, FontId, Pos2, Vec2 as EVec2};
 
-/// How long a whisper stays (as renderer/app.js: 3.2 s, then a 0.9 s fade).
+/// How long a whisper stays (as in the Electron app: 3.2 s, then a 0.9 s fade).
 const HOLD_SECS: f32 = 3.2;
 const FADE_SECS: f32 = 0.9;
 /// The gap between one letter's entrance and the next.
@@ -212,7 +212,7 @@ impl Whispers {
             let painter = ui.painter();
             let font = FontId::proportional(FONT_SIZE);
             // Lay the line out once to find each letter's place, centred
-            // near the bottom, under the eye (renderer/style.css: bottom 8%).
+            // near the bottom, under the eye (the Electron app's CSS: bottom 8%).
             let galley = painter.layout_no_wrap(text.clone(), font.clone(), core);
             let origin = Pos2::new(
                 (points.x - galley.size().x) / 2.0,

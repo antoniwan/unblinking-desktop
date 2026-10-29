@@ -93,7 +93,7 @@ impl Prefs {
     }
 
     /// Reads the saved prefs. A missing or hand-mangled file falls back to
-    /// the defaults, key by key, as main.js did.
+    /// the defaults, key by key, as the Electron app did.
     pub fn load() -> Prefs {
         let Some(path) = Self::path() else {
             return Prefs::default();

@@ -16,7 +16,7 @@ use crate::render::fonts;
 use crate::render::whisper::Whispers;
 use crate::tools::snap::write_snap;
 
-/// Window size in logical pixels (scaled by the monitor's DPI), as in main.js.
+/// Window size in logical pixels (scaled by the monitor's DPI), as in the Electron app.
 const WIN_SIZE: f64 = 320.0;
 /// Gap from the work area's top right corner, in logical pixels.
 const MARGIN: f64 = 24.0;
@@ -314,7 +314,7 @@ fn window_attributes(
 }
 
 /// Whether a saved spot (logical pixels) still lands on a monitor, with the
-/// same 100 pixel slack main.js allowed. Monitors come and go.
+/// same 100 pixel slack the Electron app allowed. Monitors come and go.
 fn on_some_screen(event_loop: &ActiveEventLoop, p: Position) -> bool {
     event_loop.available_monitors().any(|m| {
         let k = m.scale_factor();
