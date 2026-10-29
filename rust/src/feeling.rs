@@ -194,6 +194,55 @@ pub fn choose(ctx: &Context, held: &Held) -> Choice {
     }
 }
 
+/// How worried it is about you being up late, and how it shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Worry {
+    /// What it might say; one is picked at random.
+    pub lines: &'static [&'static str],
+    /// It says one at most this often, in seconds.
+    pub every_secs: f32,
+    /// Extra tremble on top of the Worried look's own shake.
+    pub tremble: f32,
+}
+
+/// The later it gets, the more it insists: gentle for the first hour past
+/// midnight, firmer in the second, plainly pleading after that. It never
+/// scolds, and it never stops you; you can always ignore it.
+pub fn worry(up_late_secs: f32) -> Worry {
+    let minutes = up_late_secs / 60.0;
+    if minutes < 60.0 {
+        Worry {
+            lines: &[
+                "It's late. Rest your eyes.",
+                "Sleep. I will keep watch.",
+                "Even I close my eye sometimes.",
+            ],
+            every_secs: 30.0 * 60.0,
+            tremble: 0.0,
+        }
+    } else if minutes < 120.0 {
+        Worry {
+            lines: &[
+                "It's very late. Go to bed.",
+                "Whatever it is will keep until morning.",
+                "Your eyes are tired. I can tell.",
+            ],
+            every_secs: 20.0 * 60.0,
+            tremble: 0.1,
+        }
+    } else {
+        Worry {
+            lines: &[
+                "Please. Sleep.",
+                "The sun will rise soon. Rest before it does.",
+                "I will still be here. Go.",
+            ],
+            every_secs: 15.0 * 60.0,
+            tremble: 0.2,
+        }
+    }
+}
+
 /// A face reading counts only if the reader is at least this sure.
 const MIN_CONFIDENCE: f32 = 0.5;
 /// Smiling starts above this and stops below the lower one. Two thresholds
@@ -821,5 +870,15 @@ mod tests {
             ..long
         };
         assert_eq!(mood(&bang), "Wrathful");
+    }
+
+    #[test]
+    fn worry_grows_more_insistent() {
+        let early = worry(30.0 * 60.0);
+        let later = worry(90.0 * 60.0);
+        let latest = worry(3.0 * 3600.0);
+        assert!(early.every_secs > later.every_secs && later.every_secs > latest.every_secs);
+        assert!(early.tremble < later.tremble && later.tremble < latest.tremble);
+        assert_ne!(early.lines, latest.lines);
     }
 }

@@ -516,14 +516,6 @@ fn on_some_screen(event_loop: &ActiveEventLoop, p: Position) -> bool {
 /// The whole app. winit calls into it through `ApplicationHandler`.
 /// Hours after midnight before this count as the small hours.
 const LATE_UNTIL_HOUR: u32 = 5;
-/// What it says when you're up too late, and how often at most.
-const WORRY_LINES: [&str; 4] = [
-    "It's late. Rest your eyes.",
-    "Sleep. I will keep watch.",
-    "Even I close my eye sometimes.",
-    "The night is long. Go to bed.",
-];
-const WORRY_EVERY: Duration = Duration::from_secs(30 * 60);
 
 struct App {
     args: Args,
@@ -808,9 +800,15 @@ impl App {
             },
         );
         // Worried: tell you to rest, gently, at most twice an hour.
-        if choice.mood == "Worried" && self.last_worry.is_none_or(|t| t.elapsed() > WORRY_EVERY) {
+        // It gets more insistent the later it gets (feeling::worry).
+        let worry = feeling::worry(self.up_late);
+        if choice.mood == "Worried"
+            && self
+                .last_worry
+                .is_none_or(|t| t.elapsed().as_secs_f32() > worry.every_secs)
+        {
             self.last_worry = Some(now);
-            let line = WORRY_LINES[fastrand::usize(..WORRY_LINES.len())];
+            let line = worry.lines[fastrand::usize(..worry.lines.len())];
             eprintln!("worried: {line}");
             if self.prefs.whispers {
                 self.voice.say(line);
@@ -848,6 +846,9 @@ impl App {
             // tint wants 0..1 with 0.5 an ordinary day.
             let day = (book.day_brightness(now_unix) - 0.45) / 0.55 * 0.5 + 0.25;
             look = feeling::tint(look, &t, day);
+        }
+        if mood == "Worried" {
+            look.shake += worry.tremble;
         }
         self.flow = (self.flow + dt as f32 * look.flow) % 1.0;
 
