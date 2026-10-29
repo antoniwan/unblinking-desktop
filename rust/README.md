@@ -61,6 +61,8 @@ the menu. A left click on the tray icon shows or hides it.
 | `--mood=NAME` | Holds one of the studio's moods. |
 | `--whisper=TEXT` | Shows TEXT as a whisper once the eye opens. |
 | `--voice` | Turns the drone and spoken whispers on for this run only. |
+| `--demo` | Plays a scripted 14 s performance (moods, whispers, a flinch) with no camera or mic, then quits. |
+| `--record=FILE.gif` | Saves the frames it draws (eye and whispers) as an animated GIF. Sound is off while recording. |
 | `--bench-face` | Times the face model on a blank 1280x720 frame and quits. |
 | `--blind` | Starts blinded for this run only (camera and mic off), without saving it. |
 

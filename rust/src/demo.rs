@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use crate::desktop::Point;
+use crate::mind::Line;
 
 /// How long the performance runs before the eye closes.
 pub const LENGTH: f32 = 14.0;
@@ -20,13 +21,14 @@ const MOODS: [(f32, &str); 6] = [
     (12.2, "Drowsy"),
 ];
 
-/// What it whispers, and when.
-const WHISPERS: [(f32, &str); 5] = [
-    (1.3, "I see you."),
-    (3.6, "What is that?"),
-    (6.0, "Silence."),
-    (8.3, "There you are."),
-    (10.6, "Where are you?"),
+/// What it whispers, and when, with the kind of line the mind would log it
+/// as (None: one only the script says).
+const WHISPERS: [(f32, &str, Option<Line>); 5] = [
+    (1.3, "I see you.", Some(Line::First)),
+    (3.6, "What is that?", None),
+    (6.0, "Silence.", Some(Line::Loud)),
+    (8.3, "There you are.", Some(Line::Returned)),
+    (10.6, "Where are you?", Some(Line::Gone)),
 ];
 
 /// A loud bang, to make it flinch.
@@ -70,13 +72,13 @@ impl Demo {
     }
 
     /// A whisper that has just come due, if any.
-    pub fn whisper(&mut self) -> Option<&'static str> {
-        let (at, text) = *WHISPERS.get(self.whispered)?;
+    pub fn whisper(&mut self) -> Option<(&'static str, Option<Line>)> {
+        let (at, text, kind) = *WHISPERS.get(self.whispered)?;
         if self.t() < at {
             return None;
         }
         self.whispered += 1;
-        Some(text)
+        Some((text, kind))
     }
 
     /// Where the "cursor" is: settled down and to the left of the eye (where

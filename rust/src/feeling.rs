@@ -808,7 +808,13 @@ mod tests {
             ..night
         };
         assert_eq!(mood(&fond), "Worried");
-        assert_eq!(mood(&Context { temperament: None, ..fond }), "Watchful");
+        assert_eq!(
+            mood(&Context {
+                temperament: None,
+                ..fond
+            }),
+            "Watchful"
+        );
         // A bang still wins over worry.
         let bang = Context {
             last_said: Some((Line::Loud, 0.5)),

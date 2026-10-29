@@ -14,6 +14,10 @@ pub struct EguiWindow {
     pub ctx: egui::Context,
     state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
+    /// Debugging and README aid: with UNBLINKING_WINDOW_SNAP=MS set, the
+    /// frame this window presents at MS is saved as "<title>.png". It reads
+    /// back the window's own pixels, so nothing else on screen can get in.
+    snap: Option<(std::time::Instant, String)>,
 }
 
 impl EguiWindow {
@@ -40,7 +44,8 @@ impl EguiWindow {
             .unwrap_or(caps.formats[0]);
         let inner = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | (caps.usages & wgpu::TextureUsages::COPY_SRC),
             format,
             width: inner.width.max(1),
             height: inner.height.max(1),
@@ -66,7 +71,22 @@ impl EguiWindow {
             Some(device.limits().max_texture_dimension_2d as usize),
         );
         let renderer = egui_wgpu::Renderer::new(device, format, Default::default());
+        let snap = std::env::var("UNBLINKING_WINDOW_SNAP")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map(|ms| {
+                let at = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                let name: String = title
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == ' ')
+                    .collect();
+                (
+                    at,
+                    format!("{}.png", name.trim().replace(' ', "-").to_lowercase()),
+                )
+            });
         Ok(EguiWindow {
+            snap,
             window,
             surface,
             config,
@@ -168,8 +188,84 @@ impl EguiWindow {
                 .forget_lifetime();
             self.renderer.render(&mut pass, prims, &screen);
         }
+        let readback = self
+            .snap
+            .take_if(|(at, _)| std::time::Instant::now() >= *at)
+            .map(|(_, name)| {
+                let (w, h) = (self.config.width, self.config.height);
+                let row = (w * 4).div_ceil(256) * 256;
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("window snap"),
+                    size: (row * h) as u64,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_texture_to_buffer(
+                    frame.texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(row),
+                            rows_per_image: Some(h),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                (buffer, row, name)
+            });
         queue.submit(extra.into_iter().chain([encoder.finish()]));
+        if let Some((buffer, row, name)) = readback {
+            if let Err(err) = save_png(
+                device,
+                &buffer,
+                row,
+                (self.config.width, self.config.height),
+                self.config.format,
+                &name,
+            ) {
+                eprintln!("window snap failed: {err}");
+            }
+        }
         self.window.pre_present_notify();
         queue.present(frame);
     }
+}
+
+/// Waits for a read-back frame and writes it as an RGB PNG.
+fn save_png(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    row: u32,
+    (w, h): (u32, u32),
+    format: wgpu::TextureFormat,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map window snap"));
+    device.poll(wgpu::PollType::wait_indefinitely())?;
+    let data = slice.get_mapped_range()?;
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h as usize {
+        for px in data[y * row as usize..y * row as usize + w as usize * 4].chunks_exact(4) {
+            rgb.extend_from_slice(&if bgra {
+                [px[2], px[1], px[0]]
+            } else {
+                [px[0], px[1], px[2]]
+            });
+        }
+    }
+    let mut png = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(name)?), w, h);
+    png.set_color(png::ColorType::Rgb);
+    png.write_header()?.write_image_data(&rgb)?;
+    eprintln!("{name} written");
+    Ok(())
 }

@@ -43,6 +43,8 @@ pub struct Snapshot {
     pub detections: Vec<Detection>,
     pub can_see: bool,
     pub blind: bool,
+    /// Playing --demo: no camera, no mic.
+    pub demo: bool,
     pub picture: Option<Arc<RgbImage>>,
     /// Where "sitting normally" lands in the picture, 0..1, if it can be placed.
     pub rest_in_picture: Option<[f32; 2]>,
@@ -317,7 +319,9 @@ fn sight_lens(
         return;
     }
     let Some(tex) = picture else {
-        let note = if snap.can_see {
+        let note = if snap.demo {
+            "Demo: the camera stays off. The script plays the senses."
+        } else if snap.can_see {
             "Opening the camera…"
         } else {
             "No camera"

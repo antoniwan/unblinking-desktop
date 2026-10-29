@@ -808,9 +808,7 @@ impl App {
             },
         );
         // Worried: tell you to rest, gently, at most twice an hour.
-        if choice.mood == "Worried"
-            && self.last_worry.is_none_or(|t| t.elapsed() > WORRY_EVERY)
-        {
+        if choice.mood == "Worried" && self.last_worry.is_none_or(|t| t.elapsed() > WORRY_EVERY) {
             self.last_worry = Some(now);
             let line = WORRY_LINES[fastrand::usize(..WORRY_LINES.len())];
             eprintln!("worried: {line}");
@@ -825,8 +823,23 @@ impl App {
             (None, Some(demo)) => (demo.mood(), "the --demo script"),
             (None, None) => (choice.mood, choice.reason),
         };
-        if let Some(text) = self.demo.as_mut().and_then(|d| d.whisper()) {
-            self.pending_whisper = Some(text.to_string());
+        // The script's whispers, unless a mood is held (stills for the README).
+        let script_talks = self.args.mood.is_none();
+        if let Some(text) = self
+            .demo
+            .as_mut()
+            .filter(|_| script_talks)
+            .and_then(|d| d.whisper())
+        {
+            match text.1 {
+                // Logged like the mind's own, so Blinki's Senses lists it;
+                // the log puts it on screen (and speaks it) next frame.
+                Some(kind) => self
+                    .whisper_log
+                    .borrow_mut()
+                    .push((Instant::now(), kind, text.0)),
+                None => self.pending_whisper = Some(text.0.to_string()),
+            }
         }
         self.moods.set(mood);
         let mut look = self.moods.now();
@@ -936,7 +949,8 @@ impl App {
             colors: state.colors,
             detections,
             can_see,
-            blind: self.prefs.blind,
+            blind: self.prefs.blind && self.demo.is_none(),
+            demo: self.demo.is_some(),
             picture,
             rest_in_picture,
             levels: self.levels.clone(),
