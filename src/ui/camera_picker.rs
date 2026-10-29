@@ -14,7 +14,7 @@ use winit::window::WindowId;
 use crate::platform::desktop::Point;
 use crate::senses::placement::{self, CameraSpot, Monitor};
 use crate::ui::egui_window::EguiWindow;
-use crate::ui::senses_panel::{Ink, arcane_circle, diamond, star, with_alpha};
+use crate::ui::senses_panel::style::{Ink, arcane_circle, diamond, star, with_alpha};
 
 /// What the window asks of the app after a frame.
 pub enum Picked {
@@ -112,6 +112,16 @@ fn picker(
         area.left_top() + EVec2::new(0.0, 70.0),
         area.right_bottom() - EVec2::new(0.0, 64.0),
     );
+    if monitors.is_empty() {
+        p.text(
+            stage.center(),
+            Align2::CENTER_CENTER,
+            "No monitors found",
+            FontId::proportional(15.0),
+            ink.faint,
+        );
+        return Picked::Nothing;
+    }
     let (lo, hi) = monitors.iter().fold(
         (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN)),
         |(lo, hi), m| {
@@ -125,16 +135,6 @@ fn picker(
             )
         },
     );
-    if monitors.is_empty() {
-        p.text(
-            stage.center(),
-            Align2::CENTER_CENTER,
-            "No monitors found",
-            FontId::proportional(15.0),
-            ink.faint,
-        );
-        return Picked::Nothing;
-    }
     let span = hi - lo;
     let k = (stage.width() / span.x).min(stage.height() / span.y) * 0.9;
     let offset = stage.center() - (lo + span / 2.0).to_vec2() * k;

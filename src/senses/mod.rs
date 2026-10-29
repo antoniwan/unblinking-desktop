@@ -1,4 +1,4 @@
-//! Sight (and, later, hearing): the Rust side of renderer/senses.js.
+//! Sight and hearing (in the Electron app, the renderer did this part).
 //! Camera frames go to a face detector running locally. Nothing is
 //! recorded, stored, or sent anywhere; each frame is dropped once looked at.
 //! Reading the face's expression (`expression`) is off unless the user turns

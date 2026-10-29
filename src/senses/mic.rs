@@ -75,7 +75,7 @@ fn store(level: &AtomicU32, value: f32) {
 }
 
 /// Loudness 0..1 on a decibel scale: about -55 dB is silence, -12 dB is a
-/// shout. The same formula as `listen()` in senses.js.
+/// shout. The same formula the Electron app used.
 ///
 /// `impl Iterator<Item = f32>` accepts any sequence of f32s without
 /// collecting them into a Vec first, so nothing is allocated here.

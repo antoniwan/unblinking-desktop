@@ -155,7 +155,7 @@ fn decode(stride: usize, cls: &[f32], obj: &[f32], bbox: &[f32], kps: &[f32]) ->
 }
 
 /// Non-maximum suppression: keep the surest box, drop the ones that overlap
-/// it, repeat. Returns the survivors biggest first, as senses.js sorted them.
+/// it, repeat. Returns the survivors biggest first, as the Electron app sorted them.
 fn nms(mut boxes: Vec<Bbox>) -> Vec<Bbox> {
     boxes.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut kept: Vec<Bbox> = Vec::new();
