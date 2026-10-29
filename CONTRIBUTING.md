@@ -2,51 +2,65 @@
 
 ## Set up
 
-```
-npm install
-npm run setup
-```
-
-`npm run setup` fetches the face model into `assets/models/` and draws the icons into `assets/icons/`. Both folders are gitignored, so run it after every fresh clone.
+Needs [Rust](https://rustup.rs) (stable, MSVC) on Windows. Everything else
+(the face models, the font, the moods) is in `assets/` and built into the
+exe, so there's nothing to fetch after a fresh clone.
 
 ## Run
 
 ```
-npm start
+cargo run --release
 ```
 
-The terminal shows the renderer's console, including a heartbeat every 3 seconds: mode, faces, face position and size, and mic level. Whispers are logged too.
+The terminal shows a heartbeat every 3 seconds: mode, mood, faces, face
+position and size, mic level, gaze, and frame rate. Mode changes and whispers
+are logged too. All the flags are in [docs/development.md](docs/development.md#flags).
 
 ## Debug snapshot
 
 ```
-npx electron . --snap=8000
+cargo run --release -- --snap=8000
 ```
 
-Saves `snap.png` in the project folder after 8 seconds, on a dark backdrop so the flames read as they would on a desktop. `snap.png` is gitignored.
+Saves `snap.png` in the current folder after 8 seconds, on a dark backdrop so
+the flames read as they would on a desktop. `snap.png` is gitignored.
+
+## Before you push
+
+```
+cargo +1.99.0 fmt --check
+cargo +1.99.0 clippy --all-targets -- -D warnings
+cargo test
+```
+
+CI pins Rust 1.99.0 for formatting and clippy; see
+[docs/development.md](docs/development.md#format-and-clippy).
 
 ## Who owns what
 
-Keep each change inside the module that owns it.
+Keep each change inside the folder that owns it.
 
-| File | Owns |
+| Folder | Owns |
 | --- | --- |
-| `src/main.js` | Window, tray / menu bar, the menu, prefs on disk, permissions, the `world` feed |
-| `src/preload.js` | The bridge (`window.unblinking`). Keep it small. |
-| `renderer/app.js` | Wiring and the frame loop |
-| `renderer/senses.js` | Camera, face detection, mic loudness |
-| `renderer/mind.js` | Behavior, moods, whisper lines |
-| `renderer/eye.js` | The shader. Everything you see. |
-| `renderer/voice.js` | Drone and spoken whispers |
-| `scripts/` | Setup: model download, icon drawing |
+| `src/app/` | The `App`, winit's callbacks, the frame loop and its pacing |
+| `src/render/` | The window, the GPU, the eye shader, whispers and their font. Everything you see. |
+| `src/mind/` | Behaviour, motion, feeling, moods and themes |
+| `src/bond/` | Remembrance and the wellbeing watch |
+| `src/senses/` | Camera, face detection, expression, mic loudness, the wake word, camera placement |
+| `src/audio/` | The drone, effects, spoken whispers, and the mixer |
+| `src/platform/` | What the app asks of Windows: cursor, full screen, single instance, the tray |
+| `src/ui/` | Blinki's Senses and "Where's my camera?" |
+| `src/tools/` | `--demo`, `--record` and `--snap` |
+| `src/prefs.rs` | Prefs on disk |
+| `src/cli.rs` | The command line flags |
 
-How they connect: [docs/architecture.md](docs/architecture.md).
+How they connect, with one line per module: [docs/architecture.md](docs/architecture.md).
 
 Rules worth keeping:
 
 - Nothing leaves the machine. Don't add network calls, analytics, or anything that stores frames or audio.
-- A new setting is a pref in `main.js` with a menu item, sent to the renderer like the others.
-- Test on Windows. If you can test the macOS menu-bar mode, say so in your PR; nobody has yet.
+- A new setting is a field in `src/prefs.rs` with a default and a tray menu item, like the others.
+- Test on Windows.
 
 ## Commits
 

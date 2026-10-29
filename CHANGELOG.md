@@ -4,6 +4,24 @@ All notable changes to Unblinking. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org).
 
+## [0.2.1] - 2026-10-29
+
+No user-visible changes. The code is tidier underneath.
+
+### Changed
+
+- **The code is grouped into folders** by job: `app/`, `render/`, `mind/`,
+  `bond/`, `senses/`, `audio/`, `platform/`, `ui/` and `tools/`, instead of
+  one flat `src/`. `main.rs` is split into `app/`, `cli.rs`, `render/gpu.rs`
+  and `tools/snap.rs`.
+- **The Rust crate moved to the repo root**, from `rust/`. Its README is now
+  `docs/development.md`, and CI runs from the root.
+
+### Removed
+
+- The Electron app's leftovers (`renderer/`, the old `src/`, `scripts/`,
+  `package.json`). The Electron version is still at the tag `v0.1.0`.
+
 ## [0.2.0] - 2026-10-29
 
 The Rust rewrite: one native exe instead of an Electron app, with much more
@@ -71,5 +89,6 @@ The original Electron version, tagged `electron-final`.
   computer, and banish.
 - A Web Audio drone and spoken whispers (Voice, off by default).
 
+[0.2.1]: https://github.com/antoniwan/unblinking-desktop/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/antoniwan/unblinking-desktop/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/antoniwan/unblinking-desktop/releases/tag/v0.1.0

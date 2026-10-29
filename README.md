@@ -6,7 +6,7 @@
 
 <p align="center"><b>A small magical eye that lives on your desktop, finds your face, and watches.</b><br>
 Native Rust, one 27 MB exe. It runs entirely on your computer and never goes online.<br>
-<sub>Version 0.2.0 · <a href="CHANGELOG.md">changelog</a></sub></p>
+<sub>Version 0.2.1 · <a href="CHANGELOG.md">changelog</a></sub></p>
 
 ---
 
@@ -81,12 +81,12 @@ Measured on this PC (Windows 11, RTX 3060), with both apps idle and blinded, aga
 
 ## Under the hood
 
-- **Rust** throughout, 168 tests (`cargo test`), checked on Windows CI with clippy and formatting, with the Electron code kept for reference until the switch-over.
+- **Rust** throughout, 168 tests (`cargo test`), checked on Windows CI with clippy and formatting. The original Electron version is kept at the tag `v0.1.0`.
 - **winit 0.30 + wgpu 30.** The eye is one fragment shader. For a transparent window on Windows, DX12 presents through a **DirectComposition** swapchain with **premultiplied alpha** (a plain swapchain can't be see-through), with Vulkan as a fallback. A transparent first frame means it never flashes a black box.
 - **The shader** is GLSL, compiled for DX12 or Vulkan by **naga**. The body is raymarched: a signed-distance sphere with layered fire inside, a hotter core seen through its veins, and a solid pupil. Around it sits a layered aura: rim bloom, halo, corona, tongues of light and curling embers. A small motion layer gives the mind's wishes a body (breath, gaze velocity, a wince). Frame pacing keeps it light when nothing's changing.
 - **Face detection**: YuNet (ONNX), run by **tract**, a pure-Rust inference engine, on its own camera thread (**nokhwa**). The box decoding and non-maximum suppression are written by hand.
 - **Sound**: **cpal** streams in both directions. The drone and the effects are synthesised sample by sample in the audio callback, without allocating, steered through atomics. Speech uses the system voice via **tts**.
-- **egui** (on the same wgpu device) draws the whispers, Blinki's Senses and the camera picker. **tray-icon + muda** do the menu, **global-hotkey** the shortcut, and **serde** the prefs (shared with the Electron app's `prefs.json`).
+- **egui** (on the same wgpu device) draws the whispers, Blinki's Senses and the camera picker. **tray-icon + muda** do the menu, **global-hotkey** the shortcut, and **serde** the prefs (the same `prefs.json` the Electron version used).
 - **Size**: LTO, stripped, size-optimised everywhere except the face model's runtime. Asking wgpu for small GPU memory blocks saved about 180 MB.
 
 ## Run it
@@ -94,11 +94,10 @@ Measured on this PC (Windows 11, RTX 3060), with both apps idle and blinded, aga
 Needs [Rust](https://rustup.rs) (stable, MSVC) on Windows.
 
 ```bash
-cd rust
 cargo run --release
 ```
 
-Or build the installer: [rust/README.md](rust/README.md#build-the-installer).
+Or build the installer: [docs/development.md](docs/development.md#build-the-installer).
 
 | Flag | What it does |
 | --- | --- |
@@ -110,16 +109,14 @@ Or build the installer: [rust/README.md](rust/README.md#build-the-installer).
 | `--blind`, `--voice` | Blinded, or all sound on, for this run only |
 | `--bench-face` | Times the face model |
 
-More detail, including a module map: [rust/README.md](rust/README.md).
-
-The original Electron version (`npm install`, `npm run setup`, `npm start`) still lives in `src/` and `renderer/` until the switch-over.
+More detail: [docs/development.md](docs/development.md) for building, testing and flags, and [docs/architecture.md](docs/architecture.md) for how the code fits together, with a module map.
 
 ## Versioning
 
 Unblinking follows [Semantic Versioning](https://semver.org). Before 1.0, a
 minor bump (0.2 to 0.3) brings new features and a patch (0.2.0 to 0.2.1)
-brings fixes. The version lives in `rust/Cargo.toml`. It's shown at the top
-of the tray menu, names the installer (`unblinking_0.2.0_x64-setup.exe`) and
+brings fixes. The version lives in `Cargo.toml`. It's shown at the top
+of the tray menu, names the installer (`unblinking_0.2.1_x64-setup.exe`) and
 the CI build, and each release is tagged `vX.Y.Z`. `v0.1.0`, also tagged
 `electron-final`, is the original Electron version. See
 [CHANGELOG.md](CHANGELOG.md).
@@ -133,7 +130,7 @@ the CI build, and each release is tagged `vX.Y.Z`. `v0.1.0`, also tagged
 - **Remembrance**, a system from *Lifesworn*, antoniwan's own game. The blinki's feeding and temperament design (a ledger of deeds that slowly shapes it, glad about what's good for you) comes from it.
 - Moods, colours and schools of magic were tuned in the Blinki Studio.
 
-Licence texts are in [rust/assets](rust/assets).
+Licence texts are in [assets](assets).
 
 ## License
 
