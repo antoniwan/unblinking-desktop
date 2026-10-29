@@ -5,3 +5,6 @@ dist/
 # Fetched and drawn by `npm run setup`
 assets/models/
 assets/icons/
+
+# Rust build output
+rust/target/

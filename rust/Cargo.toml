@@ -1,0 +1,70 @@
+[package]
+name = "unblinking"
+version = "0.2.0"
+edition = "2024"
+
+# The Windows installer, built with `cargo packager --release` (cargo-packager):
+# an NSIS setup .exe that installs for the current user, with a Start menu
+# shortcut and an uninstaller. Output lands in target/packager/.
+[package.metadata.packager]
+product-name = "Unblinking"
+identifier = "com.antoniwan.unblinking"
+description = "A burning eye that lives on your desktop and watches you."
+authors = ["Antonio Rodriguez Martinez"]
+publisher = "antoniwan"
+license-file = "../LICENSE"
+icons = ["assets/icon.png"]
+formats = ["nsis"]
+out-dir = "target/packager"
+before-packaging-command = "cargo build --release"
+
+[package.metadata.packager.nsis]
+installer-mode = "currentUser"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+cpal = "0.18.2"
+directories = "6.0.0"
+egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
+egui-wgpu = { version = "0.37", default-features = false }
+egui-winit = { version = "0.37", default-features = false }
+fastrand = "2.5.0"
+gif = "0.14.2"
+global-hotkey = "0.9.0"
+image = { version = "0.25", default-features = false }
+nokhwa = { version = "0.10.11", features = ["input-native"] }
+png = "0.18.1"
+pollster = "1.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tract-onnx = "0.23.9"
+tray-icon = "0.26.1"
+tts = "0.26.3"
+wgpu = { version = "30.0.1", features = ["glsl"] }
+winit = "0.30"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_WinRT", "Foundation", "Foundation_Collections", "Media_SpeechRecognition"] }
+# The wake word's phrase list and its async waits (the windows crate uses
+# these two, but doesn't re-export them).
+windows-collections = "0.3.2"
+windows-future = "0.3.2"
+
+[profile.release]
+# A small exe: whole-program optimisation, no debug symbols, and the
+# smallest code everywhere except the face model's runtime, which stays
+# fast (36.5 MB with opt-level 3 throughout, 22.3 MB like this).
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+panic = "abort"
+
+[profile.release.package.tract-core]
+opt-level = 3
+[profile.release.package.tract-linalg]
+opt-level = 3
+[profile.release.package.tract-onnx]
+opt-level = 3
+[profile.release.package.tract-data]
+opt-level = 3
