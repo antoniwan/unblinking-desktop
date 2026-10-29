@@ -5,7 +5,8 @@
 <h1 align="center">Unblinking</h1>
 
 <p align="center"><b>A small magical eye that lives on your desktop, finds your face, and watches.</b><br>
-Native Rust, one 27 MB exe. It runs entirely on your computer and never goes online.</p>
+Native Rust, one 27 MB exe. It runs entirely on your computer and never goes online.<br>
+<sub>Version 0.2.0 · <a href="CHANGELOG.md">changelog</a></sub></p>
 
 ---
 
@@ -112,6 +113,16 @@ Or build the installer: [rust/README.md](rust/README.md#build-the-installer).
 More detail, including a module map: [rust/README.md](rust/README.md).
 
 The original Electron version (`npm install`, `npm run setup`, `npm start`) still lives in `src/` and `renderer/` until the switch-over.
+
+## Versioning
+
+Unblinking follows [Semantic Versioning](https://semver.org). Before 1.0, a
+minor bump (0.2 to 0.3) brings new features and a patch (0.2.0 to 0.2.1)
+brings fixes. The version lives in `rust/Cargo.toml`. It's shown at the top
+of the tray menu, names the installer (`unblinking_0.2.0_x64-setup.exe`) and
+the CI build, and each release is tagged `vX.Y.Z`. `v0.1.0`, also tagged
+`electron-final`, is the original Electron version. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Credits
 

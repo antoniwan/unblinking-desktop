@@ -104,6 +104,12 @@ pub struct Tray {
 
 impl Tray {
     pub fn new(prefs: &Prefs) -> Result<Tray, Box<dyn Error>> {
+        // `env!` reads Cargo.toml's version at compile time.
+        let version = MenuItem::new(
+            concat!("Unblinking v", env!("CARGO_PKG_VERSION")),
+            false,
+            None,
+        );
         let status = MenuItem::new("", false, None);
         let shown = MenuItem::new("Hide the eye", true, None);
         let blind = CheckMenuItem::new("Blind it (camera and mic off)", true, prefs.blind, None);
@@ -163,6 +169,7 @@ impl Tray {
         let quit = MenuItem::new("Banish (quit)", true, None);
 
         let menu = Menu::new();
+        menu.append(&version)?;
         menu.append(&status)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&shown)?;
