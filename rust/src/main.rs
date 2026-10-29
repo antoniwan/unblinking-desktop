@@ -28,8 +28,10 @@ mod egui_window;
 mod eye;
 mod feeling;
 mod fonts;
+mod fullscreen;
 mod mind;
 mod moods;
+mod pacing;
 mod placement;
 mod prefs;
 mod record;
@@ -51,7 +53,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId, WindowLevel};
 
 use desktop::{Point, Rect};
@@ -70,6 +72,7 @@ use senses::camera::Eyes;
 use senses::expression::Expression;
 use senses::face::YuNet;
 use senses::mic::Ears;
+use senses::wake::{Wake, WakeEvent};
 use tray::{Action, Tray};
 use voice::{Effect, Voice};
 use wellbeing::Watch;
@@ -442,7 +445,9 @@ impl Gpu {
             let (w, h) = self.size();
             let mut rgba = Vec::new();
             for y in 0..h as usize {
-                for px in data[y * row as usize..y * row as usize + w as usize * 4].chunks_exact(4)
+                for px in data[y * row as usize..y * row as usize + w as usize * 4]
+                    .as_chunks::<4>()
+                    .0
                 {
                     rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
                 }
@@ -530,12 +535,18 @@ struct App {
     gpu: Option<Gpu>,
     started: Instant,
     last_frame: Instant,
+    /// When the next frame is due (see pacing.rs), and frames drawn since
+    /// the last heartbeat line, to print the frame rate.
+    next_frame: Instant,
+    frames: u32,
     mind: Mind,
     mode: Option<Mode>,
     /// The camera thread, while the eye is allowed to see.
     eyes: Option<Eyes>,
     /// The microphone, while the eye is allowed to hear.
     ears: Option<Ears>,
+    /// Listening for "Hey, OG Blinki", while that's on and it isn't blind.
+    wake: Option<Wake>,
     prefs: Prefs,
     tray: Option<Tray>,
     presence: Presence,
@@ -574,6 +585,7 @@ struct App {
     flinch_marks: VecDeque<bool>,
     last_startle: f64,
     /// Every whisper so far, for the Mind lens.
+    #[allow(clippy::type_complexity)]
     whisper_log: Rc<RefCell<Vec<(Instant, Line, &'static str)>>>,
     /// The drone and spoken whispers, and how many logged whispers it has seen.
     voice: Voice,
@@ -596,6 +608,8 @@ struct App {
     instance: Option<session::SingleInstance>,
     /// Owns the Ctrl+Alt+B shortcut; dropping it would unregister it.
     _hotkeys: Option<GlobalHotKeyManager>,
+    /// Hides the eye during full-screen games, and the pout after.
+    fullscreen: fullscreen::Watcher,
 }
 
 impl App {
@@ -681,7 +695,10 @@ impl App {
         );
 
         // Debug heartbeat in the terminal, as app.js had: what it sees.
+        self.frames += 1;
         if self.last_beat.elapsed() >= Duration::from_secs(3) {
+            let fps = self.frames as f64 / self.last_beat.elapsed().as_secs_f64();
+            self.frames = 0;
             self.last_beat = now;
             for (i, f) in faces.iter().enumerate().skip(1) {
                 eprintln!(
@@ -700,7 +717,7 @@ impl App {
                 .unwrap_or_default();
             let level = self.ears.as_ref().map(Ears::level);
             eprintln!(
-                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?} gaze=({:.2},{:.2})",
+                "mode={:?} mood={} sight={can_see} faces={}{first} level={level:.2?} gaze=({:.2},{:.2}) fps={fps:.0}",
                 s.mode,
                 self.moods.current().name,
                 faces.len(),
@@ -818,10 +835,12 @@ impl App {
             }
         }
         // `as_deref` turns `Option<String>` into `Option<&str>` without copying.
-        let (mood, reason) = match (self.args.mood.as_deref(), &self.demo) {
-            (Some(m), _) => (m, "held by --mood"),
-            (None, Some(demo)) => (demo.mood(), "the --demo script"),
-            (None, None) => (choice.mood, choice.reason),
+        let sulk = self.fullscreen.sulk().filter(|_| !self.prefs.blind);
+        let (mood, reason) = match (self.args.mood.as_deref(), &self.demo, sulk) {
+            (Some(m), _, _) => (m, "held by --mood"),
+            (None, Some(demo), _) => (demo.mood(), "the --demo script"),
+            (None, None, Some(m)) => (m, "sulking after a full-screen app"),
+            (None, None, None) => (choice.mood, choice.reason),
         };
         // The script's whispers, unless a mood is held (stills for the README).
         let script_talks = self.args.mood.is_none();
@@ -1051,6 +1070,7 @@ impl App {
             self.eyes = None;
             self.ears = None;
             self.expression = None;
+            self.sync_wake();
             eprintln!("senses closed");
             return;
         }
@@ -1069,6 +1089,48 @@ impl App {
             self.ears = Ears::open()
                 .map_err(|err| eprintln!("no hearing: {err}"))
                 .ok();
+        }
+        self.sync_wake();
+    }
+
+    /// Starts or stops the wake word to match its toggle. Blind wins: a
+    /// blinded eye hears nothing, names included, and dropping the Wake
+    /// frees the mic.
+    fn sync_wake(&mut self) {
+        if !self.prefs.wake_word || self.prefs.blind {
+            self.wake = None;
+        } else if self.wake.is_none() {
+            // No name pref yet, so only "Hey, OG Blinki" and "Hey Blinki".
+            self.wake = Some(Wake::start(self.prefs.name.clone()));
+        }
+    }
+
+    /// Someone called it, or the wake word could not work here.
+    fn on_wake(&mut self, event: WakeEvent) {
+        match event {
+            WakeEvent::Heard(words) => {
+                eprintln!("wake word: heard {words:?}");
+                if !self.presence.shown() {
+                    self.appear();
+                }
+                self.mind.called();
+            }
+            WakeEvent::Failed(why) => {
+                // Said once: the toggle turns itself off, so this can't repeat
+                // until the user turns it back on.
+                eprintln!("wake word off: {why}");
+                self.wake = None;
+                self.prefs.wake_word = false;
+                self.prefs.save();
+                if self.prefs.whispers {
+                    const DEAF: &str = "I can't hear names on this computer yet.";
+                    self.pending_whisper = Some(DEAF.to_string());
+                    self.voice.say(DEAF);
+                }
+            }
+        }
+        if let Some(tray) = &self.tray {
+            tray.refresh(&self.prefs, self.presence.shown());
         }
     }
 
@@ -1095,6 +1157,11 @@ impl App {
                 self.set_senses(!on);
             }
             Action::Whispers(on) => self.prefs.whispers = on,
+            Action::HideFullscreen(on) => self.prefs.hide_fullscreen = on,
+            Action::WakeWord(on) => {
+                self.prefs.wake_word = on;
+                self.sync_wake();
+            }
             Action::Mute(channel, on) => {
                 channel.set(&mut self.prefs.sound, on);
                 self.apply_sound();
@@ -1225,6 +1292,52 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Draws a frame if one is due, and tells winit when to wake next.
+    fn pace(&mut self, event_loop: &ActiveEventLoop) {
+        let hidden = self.presence == Presence::Hidden;
+        // Look at faces less often while nobody can see the eye react.
+        if let Some(eyes) = &self.eyes {
+            eyes.set_resting(hidden);
+        }
+        let no_face_for = self
+            .last_face
+            .map_or(self.started.elapsed(), |t| t.elapsed());
+        let p = pacing::Pacing {
+            shown: self.presence.shown(),
+            fading: matches!(self.presence, Presence::Opening(_) | Presence::Closing(..)),
+            blind: self.prefs.blind,
+            calm: self.mode == Some(Mode::Hunting)
+                && no_face_for >= pacing::CALM_AFTER
+                && self.last_noise.elapsed() >= pacing::CALM_AFTER,
+            egui_open: self.panel.is_some() || self.picker.is_some(),
+        };
+        let now = Instant::now();
+        let Some(interval) = pacing::frame_interval(p) else {
+            // Nothing to draw. Take in the camera's reports so they don't
+            // pile up in the channel, and tick slowly for the tray's sake.
+            if let Some(eyes) = &mut self.eyes {
+                eyes.look();
+            }
+            self.next_frame = now;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(now + pacing::HIDDEN_TICK));
+            return;
+        };
+        if now >= self.next_frame {
+            self.next_frame = pacing::next_due(self.next_frame, now, interval);
+            if let Some(gpu) = &self.gpu {
+                if hidden {
+                    // A hidden window gets no redraw events from Windows,
+                    // so hand ourselves one (it draws the egui windows only).
+                    let id = gpu.window.id();
+                    self.window_event(event_loop, id, WindowEvent::RedrawRequested);
+                } else {
+                    gpu.window.request_redraw();
+                }
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }
 
     fn snap(&self, gpu: &mut Gpu, state: &EyeState) -> Result<(), Box<dyn Error>> {
@@ -1384,7 +1497,20 @@ impl ApplicationHandler for App {
                     gpu.whispers
                         .show(&text, School::of_mood(&self.moods.current().name));
                 }
-                gpu.render(&state);
+                // Back from a full-screen app: one jealous line, once it's open.
+                if self.presence == Presence::Open
+                    && let Some(text) = self.fullscreen.take_line()
+                    && self.prefs.whispers
+                    && !self.prefs.blind
+                {
+                    gpu.whispers
+                        .show(text, School::of_mood(&self.moods.current().name));
+                    self.voice.say(text);
+                }
+                // While hidden (still drawing for the egui windows), skip the eye.
+                if self.presence != Presence::Hidden {
+                    gpu.render(&state);
+                }
                 // --record: keep this frame, as drawn.
                 if self.recording.as_ref().is_some_and(|r| r.wants_frame()) {
                     let size = gpu.size();
@@ -1416,14 +1542,14 @@ impl ApplicationHandler for App {
                     }
                 }
                 // Blinki's Senses follows along, one picture per eye frame.
-                if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot) {
-                    if let Some(sound) = panel.draw(&gpu.device, &gpu.queue, snap) {
-                        self.prefs.sound = sound;
-                        self.apply_sound();
-                        self.prefs.save();
-                        if let Some(tray) = &self.tray {
-                            tray.refresh(&self.prefs, self.presence.shown());
-                        }
+                if let (Some(panel), Some(snap)) = (&mut self.panel, &self.snapshot)
+                    && let Some(sound) = panel.draw(&gpu.device, &gpu.queue, snap)
+                {
+                    self.prefs.sound = sound;
+                    self.apply_sound();
+                    self.prefs.save();
+                    if let Some(tray) = &self.tray {
+                        tray.refresh(&self.prefs, self.presence.shown());
                     }
                 }
                 if snap_due {
@@ -1439,17 +1565,32 @@ impl ApplicationHandler for App {
         }
     }
 
-    /// After each batch of events: ask for the next frame. With vsync on,
-    /// presenting blocks until the screen is ready, which paces the loop.
+    /// After each batch of events: poll the tray and friends, then decide
+    /// when the next frame is due and sleep until then (see pacing.rs).
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // `map_or_else(Vec::new, ..)`: no tray, no clicks.
         let actions = self.tray.as_ref().map_or_else(Vec::new, Tray::poll);
         for action in actions {
             self.act(action, event_loop);
         }
+        let called = self.wake.as_ref().map_or_else(Vec::new, Wake::poll);
+        for event in called {
+            self.on_wake(event);
+        }
         // Launched again: show the eye (as Electron's 'second-instance').
         if self.instance.as_ref().is_some_and(|i| i.woken()) && !self.presence.shown() {
             self.appear();
+        }
+        // Full screen: step aside (hiding, not quitting, and no pref saved),
+        // then come back once it's over. The watcher itself asks Windows
+        // only about once a second.
+        match self
+            .fullscreen
+            .tick(self.prefs.hide_fullscreen, self.presence.shown())
+        {
+            Some(fullscreen::Do::Hide) => self.close(AfterClose::Hide, event_loop),
+            Some(fullscreen::Do::Return) => self.appear(),
+            None => {}
         }
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state == HotKeyState::Pressed {
@@ -1469,9 +1610,7 @@ impl ApplicationHandler for App {
                 self.prefs.save();
             }
         }
-        if let Some(gpu) = &self.gpu {
-            gpu.window.request_redraw();
-        }
+        self.pace(event_loop);
     }
 }
 
@@ -1479,7 +1618,7 @@ impl ApplicationHandler for App {
 /// premultiplied, so "over" is just `colour + backdrop * (1 - alpha)`.
 fn write_snap(path: &str, (w, h): (u32, u32), rgba: &[u8]) -> Result<(), Box<dyn Error>> {
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let keep = 255 - px[3] as u32;
         for i in 0..3 {
             let v = px[i] as u32 + (SNAP_BACKDROP[i] as u32 * keep + 127) / 255;
@@ -1498,7 +1637,7 @@ fn write_snap(path: &str, (w, h): (u32, u32), rgba: &[u8]) -> Result<(), Box<dyn
 /// has all three: clear corners, a glowing fringe, a solid sphere.
 fn alpha_census(rgba: &[u8]) -> (usize, usize, usize) {
     let mut counts = (0, 0, 0);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         match px[3] {
             0 => counts.0 += 1,
             255 => counts.2 += 1,
@@ -1582,10 +1721,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         gpu: None,
         started: now,
         last_frame: now,
+        next_frame: now,
+        frames: 0,
         mind: Mind::new(say),
         mode: None,
         eyes: None,
         ears: None,
+        wake: None,
         prefs,
         tray: None,
         presence: Presence::Hidden,
@@ -1624,6 +1766,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         last_worry: None,
         _hotkeys: hotkeys,
         instance,
+        fullscreen: fullscreen::Watcher::new(),
     };
     app.apply_sound();
     app.recording = app.args.record.clone().map(record::Recording::new);

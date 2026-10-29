@@ -71,7 +71,7 @@ impl Recording {
 /// Premultiplied RGBA over the backdrop: colour + backdrop * (1 - alpha).
 fn over_backdrop(rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         let keep = 255 - px[3] as u32;
         for i in 0..3 {
             rgb.push((px[i] as u32 + (BACKDROP[i] as u32 * keep + 127) / 255).min(255) as u8);

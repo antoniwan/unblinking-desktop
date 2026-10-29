@@ -1,6 +1,6 @@
 //! The camera runs on its own thread, so a slow frame never stalls the eye.
-//! It looks for faces at most 15 times a second and sends what it saw to the
-//! main loop over a channel.
+//! It looks for faces at most 15 times a second (about 3 while the eye is
+//! hidden) and sends what it saw to the main loop over a channel.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +22,11 @@ use super::{Detection, Detector};
 
 /// Face detection is the costly part; 15 times a second is plenty.
 const LOOK_EVERY: Duration = Duration::from_millis(66);
+/// While the eye is hidden nobody sees it react, so look about 3 times a
+/// second: a fifth of the work. The camera stays open (reopening one takes a
+/// second or more, and its light would blink), and a fresh sight is ready the
+/// moment the eye comes back.
+const LOOK_EVERY_RESTING: Duration = Duration::from_millis(333);
 
 /// How wide the live picture for Blinki's Senses is.
 const PREVIEW_WIDTH: u32 = 480;
@@ -49,6 +54,8 @@ pub struct Eyes {
     stop: Arc<AtomicBool>,
     /// Set while Blinki's Senses is open and wants the picture.
     preview: Arc<AtomicBool>,
+    /// Set while the eye is hidden: look at faces less often.
+    resting: Arc<AtomicBool>,
     /// Set while the user lets the eye read their expression.
     feel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -76,10 +83,12 @@ impl Eyes {
         let (tx, reports) = mpsc::channel();
         let preview = Arc::new(AtomicBool::new(false));
         let feel = Arc::new(AtomicBool::new(false));
+        let resting = Arc::new(AtomicBool::new(false));
         let flags = Flags {
             stop: Arc::clone(&stop),
             preview: Arc::clone(&preview),
             feel: Arc::clone(&feel),
+            resting: Arc::clone(&resting),
         };
         // `move` hands the closure ownership of what it uses (the detector,
         // the flags, the sender), so they travel to the new thread with it.
@@ -90,6 +99,7 @@ impl Eyes {
         Eyes {
             stop,
             preview,
+            resting,
             feel,
             thread: Some(thread),
             reports,
@@ -114,6 +124,12 @@ impl Eyes {
         }
     }
 
+    /// Asks the camera thread to look less often (while the eye is hidden),
+    /// or at the full rate again. Cheap enough to call every loop.
+    pub fn set_resting(&self, on: bool) {
+        self.resting.store(on, Ordering::Relaxed);
+    }
+
     /// Lets the camera thread read the main face's expression, or stops it.
     /// Off by default. Turning it off also forgets everything it learned
     /// about the face (on the camera thread, with the next frame).
@@ -130,6 +146,8 @@ struct Flags {
     stop: Arc<AtomicBool>,
     preview: Arc<AtomicBool>,
     feel: Arc<AtomicBool>,
+    /// Set while the eye is hidden: look at faces less often.
+    resting: Arc<AtomicBool>,
 }
 
 /// `Drop` is Rust's destructor: it runs when a value goes away (goes out of
@@ -195,6 +213,7 @@ where
         stop,
         preview,
         feel,
+        resting,
     } = flags;
     // Only exists while the user has said yes; see `sense_feeling`.
     let mut feeling: Option<Feeling> = None;
@@ -209,7 +228,13 @@ where
                 break;
             }
         };
-        if last_look.is_some_and(|t| t.elapsed() < LOOK_EVERY) {
+        // Skipped frames are never decoded, so they cost almost nothing.
+        let every = if resting.load(Ordering::Relaxed) {
+            LOOK_EVERY_RESTING
+        } else {
+            LOOK_EVERY
+        };
+        if last_look.is_some_and(|t| t.elapsed() < every) {
             continue;
         }
         last_look = Some(Instant::now());

@@ -283,7 +283,7 @@ pub fn read_frame(
     let mut out = Vec::with_capacity((row * h) as usize);
     for y in 0..h as usize {
         let start = y * padded as usize;
-        for px in data[start..start + row as usize].chunks_exact(4) {
+        for px in data[start..start + row as usize].as_chunks::<4>().0 {
             if bgra {
                 out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             } else {

@@ -35,6 +35,11 @@ pub struct Prefs {
     pub sound: crate::sound::Sound,
     /// Where the webcam sits, from "Where's my camera?" (Rust app only).
     pub camera: Option<crate::placement::CameraSpot>,
+    /// Get out of the way of full-screen games, videos and presentations
+    /// (Rust app only). On by default.
+    pub hide_fullscreen: bool,
+    /// Listen for "Hey, OG Blinki" (Rust app only). Off by default.
+    pub wake_word: bool,
     /// What you call your blinki, if you've named it (Rust app only).
     pub name: Option<String>,
     /// Which theme it is, by id (see themes.rs). None is The Burning Eye.
@@ -60,6 +65,8 @@ impl Default for Prefs {
             position: None,
             look_offset: None,
             camera: None,
+            hide_fullscreen: true,
+            wake_word: false,
             name: None,
             theme: None,
             feel: false,
@@ -127,6 +134,12 @@ impl Prefs {
         }
         if let Some(v) = flag("voice") {
             prefs.voice = v;
+        }
+        if let Some(v) = flag("hideFullscreen") {
+            prefs.hide_fullscreen = v;
+        }
+        if let Some(v) = flag("wakeWord") {
+            prefs.wake_word = v;
         }
         if let Some(v) = flag("feel") {
             prefs.feel = v;
@@ -254,6 +267,80 @@ mod tests {
         };
         let text = serde_json::to_string(&p).unwrap();
         assert!(text.contains("\"clickThrough\":true"), "{text}");
+        assert!(text.contains("\"wakeWord\":false"), "{text}");
         assert_eq!(Prefs::from_json(&text), p);
+    }
+
+    #[test]
+    fn hide_fullscreen_defaults_on() {
+        assert!(
+            Prefs::from_json("{}").hide_fullscreen,
+            "missing key means on"
+        );
+        let off = Prefs {
+            hide_fullscreen: false,
+            ..Prefs::default()
+        };
+        let text = serde_json::to_string(&off).unwrap();
+        assert!(text.contains("\"hideFullscreen\":false"), "{text}");
+        assert!(!Prefs::from_json(&text).hide_fullscreen);
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let p = Prefs::from_json(r#"{ "whispers": false, "colour": "dark", "future": [1, 2] }"#);
+        let want = Prefs {
+            whispers: false,
+            ..Prefs::default()
+        };
+        assert_eq!(p, want);
+    }
+
+    #[test]
+    fn rust_only_keys_load_and_bad_ones_drop() {
+        use crate::placement::Edge;
+        let p = Prefs::from_json(
+            r#"{ "lookOffset": { "x": 0.02, "y": -0.01 }, "position": null,
+                 "camera": { "monitor": "DISPLAY2", "edge": "left", "offset": 0.25 } }"#,
+        );
+        assert_eq!(p.look_offset, Some(Position { x: 0.02, y: -0.01 }));
+        assert_eq!(p.position, None);
+        let cam = p.camera.expect("camera spot");
+        assert_eq!((cam.monitor.as_str(), cam.edge), ("DISPLAY2", Edge::Left));
+
+        let p = Prefs::from_json(
+            r#"{ "voice": true, "camera": { "monitor": "X", "edge": "diagonal", "offset": 0.5 } }"#,
+        );
+        assert_eq!(p.camera, None, "an unknown edge drops just the camera");
+        assert!(p.voice);
+    }
+
+    #[test]
+    fn everything_round_trips() {
+        use crate::placement::{CameraSpot, Edge};
+        let p = Prefs {
+            whispers: false,
+            blind: true,
+            click_through: true,
+            voice: true,
+            position: Some(Position { x: -300.5, y: 12.0 }),
+            look_offset: Some(Position { x: 0.01, y: 0.03 }),
+            camera: Some(CameraSpot {
+                monitor: "DISPLAY1".into(),
+                edge: Edge::Bottom,
+                offset: 0.7,
+            }),
+            hide_fullscreen: false,
+            wake_word: true,
+            sound: crate::sound::Sound::default(),
+            name: Some("Lucero".into()),
+            theme: Some("burning-eye".into()),
+            feel: true,
+            remember: true,
+        };
+        let text = serde_json::to_string_pretty(&p).unwrap();
+        assert_eq!(Prefs::from_json(&text), p);
+        let d = Prefs::default();
+        assert_eq!(Prefs::from_json(&serde_json::to_string(&d).unwrap()), d);
     }
 }

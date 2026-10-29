@@ -16,6 +16,16 @@ Done so far:
   exe, and frames stay in memory only.
 - Hearing. The default mic, reduced to one loudness number (cpal), feeds the
   flames and makes the eye flinch at a bang.
+- The wake word (opt-in, off by default). Tick "Wake on 'Hey, OG Blinki'"
+  in the tray, then say "Hey, OG Blinki" or "Hey Blinki": the eye appears
+  if hidden, looks at you, and answers. It uses Windows' own speech
+  recognizer with a fixed list of phrases, which runs on the computer with
+  the installed speech language pack: no cloud, no account, no key, nothing
+  recorded. Blinding the eye stops it too. It needs a speech language
+  installed (Settings > Time & language > Speech, and Language & region)
+  and the mic allowed for desktop apps (Settings > Privacy & security >
+  Microphone). If it can't start, it unticks itself and says "I can't hear
+  names on this computer yet."
 - The tray icon and its menu, which also opens when you right-click the eye:
   show or hide, blind (camera and mic really stop), whispers, voice (saved
   only for now), click-through, and banish.
@@ -39,6 +49,10 @@ Done so far:
   "Look at me" fine-tunes it.
 - One copy at a time: launching it again wakes the eye. "Start with the
   computer" in the tray adds it to Windows' per-user startup list.
+- Full-screen jealousy. During a full-screen game, video or presentation the
+  eye fades out of the way, and comes back sulking once it's over, with a
+  jealous whisper. "Hide during full-screen games" in the tray turns it off
+  (`src/fullscreen.rs`).
 - Opening and closing. The eye eases open over 0.9 s, and fades out over
   0.6 s before it hides or quits. The window only shows after a transparent
   first frame, so there's no black box.
@@ -113,6 +127,23 @@ looks at a 1280x720 frame in 23.6 ms (`--bench-face`). Asking wgpu for small
 GPU memory blocks (`MemoryHints::MemoryUsage`) saved about 180 MB of
 private memory.
 
+## Frame rate and idle cost
+
+The eye doesn't draw as fast as the monitor allows. `src/pacing.rs` picks a
+frame interval and the loop sleeps until then (`ControlFlow::WaitUntil`):
+
+| State | Eye frames | Face model |
+| --- | --- | --- |
+| Shown, opening or closing, or a Senses/camera window open | 60 a second | 15 a second |
+| Shown but blinded, or calm (only looking around, no face and no noise for a minute) | 30 a second | off when blinded, else 15 |
+| Hidden | none; wakes 4 times a second to poll the tray, Ctrl+Alt+B and relaunches | about 3 a second, camera kept open |
+
+All motion is timed by the clock, so fewer frames never slow it down. The
+terminal heartbeat line ends in `fps=` to check the rate. To measure on
+Windows, watch the CPU and GPU columns in Task Manager (Details tab, with
+the GPU column added) for a minute each while shown with a face in view,
+shown and calm, blinded, and hidden.
+
 ## How the window is transparent
 
 wgpu's DX12 backend is set to `Dx12SwapchainKind::DxgiFromVisual`, which is a
@@ -126,12 +157,14 @@ as a fallback.
 | File | What it holds |
 | --- | --- |
 | `src/main.rs` | The window, the frame loop, the flags, and the snapshot |
+| `src/pacing.rs` | How often to draw (60, 30, or not at all), plus its tests |
 | `src/eye.rs` | The wgpu pipeline and the frame readback |
 | `src/shaders/eye.frag` | The eye shader, carried over from `eye.js` |
 | `src/mind.rs` | The mind's modes, moods and whispers, plus their tests |
 | `src/desktop.rs` | The cursor position and work area, read from Windows |
 | `src/senses/camera.rs` | The camera thread and the channel that brings its reports back |
 | `src/senses/mic.rs` | The mic stream and its loudness, shared through an atomic |
+| `src/senses/wake.rs` | The wake word: Windows' speech recognizer on its own thread, and the phrase matcher |
 | `src/prefs.rs` | Loading and saving prefs.json |
 | `src/tray.rs` | The tray icon, the menu, and the right-click popup |
 | `src/senses/face.rs` | YuNet through tract, and the box decoding and NMS that MediaPipe used to do |

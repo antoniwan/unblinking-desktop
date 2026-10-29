@@ -346,4 +346,39 @@ mod tests {
         assert_eq!(School::of_mood("Wrathful"), School::Storm);
         assert_eq!(School::of_mood("Blinded"), School::Warding);
     }
+
+    #[test]
+    fn every_letter_starts_hidden() {
+        // Nothing should flash on screen before its entrance begins.
+        for school in [
+            School::Pyromancy,
+            School::Arcane,
+            School::Umbral,
+            School::Storm,
+            School::Fae,
+            School::Druidic,
+            School::Astral,
+            School::Warding,
+        ] {
+            let p = pose(school, 0.0, 3.0);
+            assert!(p.alpha.abs() < 1e-4, "{school:?} alpha {}", p.alpha);
+        }
+    }
+
+    #[test]
+    fn every_studio_mood_but_watchful_has_its_own_school() {
+        // If the studio renames a mood, it would quietly fall back to
+        // Pyromancy; this catches that.
+        let moods = crate::moods::Moods::load();
+        let names: Vec<&str> = moods
+            .theme()
+            .moods
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(!names.is_empty());
+        for name in names.into_iter().filter(|&n| n != "Watchful") {
+            assert_ne!(School::of_mood(name), School::Pyromancy, "{name}");
+        }
+    }
 }

@@ -8,6 +8,7 @@ pub mod camera;
 pub mod expression;
 pub mod face;
 pub mod mic;
+pub mod wake;
 
 use image::RgbImage;
 

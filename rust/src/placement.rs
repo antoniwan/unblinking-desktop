@@ -267,4 +267,35 @@ mod tests {
         assert!(json.contains("\"right\""), "{json}");
         assert_eq!(serde_json::from_str::<CameraSpot>(&json).unwrap(), s);
     }
+
+    #[test]
+    fn no_monitors_means_no_spot() {
+        assert_eq!(locate(None, &[]), None);
+        assert_eq!(nearest_spot(Point { x: 0.0, y: 0.0 }, &[]), None);
+    }
+
+    #[test]
+    fn an_offset_past_the_ends_stays_on_the_screen() {
+        let r = monitors()[0].rect;
+        let spot = |offset| CameraSpot {
+            monitor: String::new(),
+            edge: Edge::Top,
+            offset,
+        };
+        assert_eq!(spot(1.7).point_on(&r), Point { x: 1920.0, y: 0.0 });
+        assert_eq!(spot(-0.5).point_on(&r), Point { x: 0.0, y: 0.0 });
+    }
+
+    #[test]
+    fn describes_itself_in_words() {
+        let mut s = CameraSpot {
+            monitor: r"\\.\DISPLAY1".into(),
+            edge: Edge::Top,
+            offset: 0.5,
+        };
+        assert_eq!(s.describe(), "top of DISPLAY1, middle");
+        s.edge = Edge::Right;
+        s.offset = 0.25;
+        assert_eq!(s.describe(), "right side of DISPLAY1, 25% along");
+    }
 }

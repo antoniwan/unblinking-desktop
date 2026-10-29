@@ -41,6 +41,8 @@ pub enum Action {
     /// A sound channel switched on or off.
     Mute(Channel, bool),
     ClickThrough(bool),
+    /// Listen for "Hey, OG Blinki".
+    WakeWord(bool),
     /// Take where you sit now as dead centre.
     LookAtMe,
     /// Open or close Blinki's Senses.
@@ -48,6 +50,8 @@ pub enum Action {
     /// Open or close "Where's my camera?".
     WhereCamera,
     StartWithComputer(bool),
+    /// Hide during full-screen games, videos and presentations.
+    HideFullscreen(bool),
     /// Become the theme with this id. `&'static str` works because the
     /// themes are parsed once and kept for the whole run.
     Theme(&'static str),
@@ -84,10 +88,12 @@ pub struct Tray {
     sound_voice: CheckMenuItem,
     sound_fx: CheckMenuItem,
     click_through: CheckMenuItem,
+    wake_word: CheckMenuItem,
     look_at_me: MenuItem,
     senses: MenuItem,
     where_camera: MenuItem,
     autostart: CheckMenuItem,
+    hide_fullscreen: CheckMenuItem,
     /// One tick item per theme in the Theme submenu, with its id.
     themes: Vec<(&'static str, CheckMenuItem)>,
     read_face: CheckMenuItem,
@@ -115,6 +121,7 @@ impl Tray {
         sound.append(&sound_fx)?;
         let click_through =
             CheckMenuItem::new("Let clicks pass through", true, prefs.click_through, None);
+        let wake_word = CheckMenuItem::new("Wake on 'Hey, OG Blinki'", true, prefs.wake_word, None);
         let look_at_me = MenuItem::new("Look at me (sit as usual, then click)", true, None);
         let senses = MenuItem::new("Blinki's Senses  (Ctrl+Alt+B)", true, None);
         let where_camera = MenuItem::new("Where's my camera?", true, None);
@@ -122,6 +129,12 @@ impl Tray {
             "Start with the computer",
             true,
             crate::session::starts_with_computer(),
+            None,
+        );
+        let hide_fullscreen = CheckMenuItem::new(
+            "Hide during full-screen games",
+            true,
+            prefs.hide_fullscreen,
             None,
         );
         // Who it is: one tick per theme this build can draw. Picking one is
@@ -157,7 +170,9 @@ impl Tray {
         menu.append(&whispers)?;
         menu.append(&sound)?;
         menu.append(&click_through)?;
+        menu.append(&wake_word)?;
         menu.append(&autostart)?;
+        menu.append(&hide_fullscreen)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&theme_menu)?;
         menu.append(&read_face)?;
@@ -191,10 +206,12 @@ impl Tray {
             sound_voice,
             sound_fx,
             click_through,
+            wake_word,
             look_at_me,
             senses,
             where_camera,
             autostart,
+            hide_fullscreen,
             themes,
             read_face,
             remember,
@@ -228,8 +245,12 @@ impl Tray {
                 Action::Mute(Channel::Fx, self.sound_fx.is_checked())
             } else if id == self.click_through.id() {
                 Action::ClickThrough(self.click_through.is_checked())
+            } else if id == self.wake_word.id() {
+                Action::WakeWord(self.wake_word.is_checked())
             } else if id == self.autostart.id() {
                 Action::StartWithComputer(self.autostart.is_checked())
+            } else if id == self.hide_fullscreen.id() {
+                Action::HideFullscreen(self.hide_fullscreen.is_checked())
             } else if id == self.read_face.id() {
                 Action::ReadFace(self.read_face.is_checked())
             } else if id == self.remember.id() {
@@ -279,6 +300,8 @@ impl Tray {
         self.sound_voice.set_checked(prefs.sound.voice);
         self.sound_fx.set_checked(prefs.sound.fx);
         self.click_through.set_checked(prefs.click_through);
+        self.hide_fullscreen.set_checked(prefs.hide_fullscreen);
+        self.wake_word.set_checked(prefs.wake_word);
         self.read_face.set_checked(prefs.feel);
         self.remember.set_checked(prefs.remember);
         // `pick` falls back to the default, so a stale pref still ticks one.
