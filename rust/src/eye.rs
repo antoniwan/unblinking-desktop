@@ -30,6 +30,21 @@ pub struct EyeState {
     pub glow: f32,
     /// How many embers rise.
     pub embers: f32,
+    /// Seconds since start, for effects that needn't loop.
+    pub time: f32,
+    /// A slow breath, -1..1 (inhale above 0).
+    pub breath: f32,
+    /// 0 is the perfect resting sphere; above 0 the body may deform.
+    pub morph: f32,
+    /// How fast the gaze and the pupil are moving, per second.
+    pub gaze_vel: [f32; 2],
+    pub pupil_vel: f32,
+    /// 0..1, how much work the shader's raymarches may do.
+    pub quality: f32,
+    /// 0..1, a flinch: the body tightens and the fire recoils.
+    pub wince: f32,
+    /// Radians: the sphere's slow roll about the view axis.
+    pub roll: f32,
 }
 
 /// The uniform block exactly as the GPU sees it (see `Params` in eye.frag).
@@ -48,6 +63,8 @@ struct Uniforms {
     f: [f32; 4],
     g: [f32; 4],
     h: [f32; 4],
+    i: [f32; 4],
+    j: [f32; 4],
 }
 
 impl Uniforms {
@@ -56,11 +73,13 @@ impl Uniforms {
             a: [size.0 as f32, size.1 as f32, s.flow, s.pupil],
             b: [s.gaze[0], s.gaze[1], s.center[0], s.center[1]],
             c: [s.heat, s.flare, s.wide, s.dim],
-            d: [s.fade, s.size, 0.0, 0.0],
+            d: [s.fade, s.size, s.time, s.breath],
             e: with(s.colors[0], s.swirl),
             f: with(s.colors[1], s.glow),
             g: with(s.colors[2], s.embers),
-            h: with(s.colors[3], 0.0),
+            h: with(s.colors[3], s.morph),
+            i: [s.gaze_vel[0], s.gaze_vel[1], s.pupil_vel, s.quality],
+            j: [s.wince, s.roll, 0.0, 0.0],
         }
     }
 }
@@ -68,6 +87,32 @@ impl Uniforms {
 /// A colour plus one more number, packed into a vec4 slot.
 fn with([r, g, b]: [f32; 3], w: f32) -> [f32; 4] {
     [r, g, b, w]
+}
+
+/// The fragment shader's layers, in the order they're pasted together.
+const LAYERS: [(&str, &str); 4] = [
+    ("common.glsl", include_str!("shaders/common.glsl")),
+    ("body.glsl", include_str!("shaders/body.glsl")),
+    ("aura.glsl", include_str!("shaders/aura.glsl")),
+    ("eye.frag", include_str!("shaders/eye.frag")),
+];
+
+/// The whole fragment shader. The layers are built into the exe, but if
+/// `UNBLINKING_SHADERS` names a folder, they're read from there instead, so
+/// a shader can be tuned by rerunning the exe without rebuilding it.
+pub fn shader_source() -> String {
+    let dir = std::env::var_os("UNBLINKING_SHADERS").map(std::path::PathBuf::from);
+    LAYERS
+        .iter()
+        .map(|(name, built_in)| match &dir {
+            Some(dir) => std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| {
+                eprintln!("shader {name}: {e}; using the built-in one");
+                built_in.to_string()
+            }),
+            None => built_in.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Everything needed to draw the eye into a texture of one format.
@@ -83,8 +128,8 @@ impl Eye {
     /// `&wgpu::Device` is a *borrow*: we use the device without taking
     /// ownership of it, so the caller still has it when we return.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let glsl = |src: &'static str, stage| wgpu::ShaderSource::Glsl {
-            shader: Cow::Borrowed(src),
+        let glsl = |src: Cow<'static, str>, stage| wgpu::ShaderSource::Glsl {
+            shader: src,
             stage,
             defines: &[],
         };
@@ -93,14 +138,14 @@ impl Eye {
         let vs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("eye.vert"),
             source: glsl(
-                include_str!("shaders/eye.vert"),
+                Cow::Borrowed(include_str!("shaders/eye.vert")),
                 wgpu::naga::ShaderStage::Vertex,
             ),
         });
         let fs = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("eye.frag"),
             source: glsl(
-                include_str!("shaders/eye.frag"),
+                Cow::Owned(shader_source()),
                 wgpu::naga::ShaderStage::Fragment,
             ),
         });
@@ -299,5 +344,26 @@ fn size_3d(width: u32, height: u32) -> wgpu::Extent3d {
         width,
         height,
         depth_or_array_layers: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The pasted-together shader parses and validates, without a GPU.
+    /// With `UNBLINKING_SHADERS` set, it checks the files in that folder.
+    #[test]
+    fn shader_compiles() {
+        use wgpu::naga;
+        let mut frontend = naga::front::glsl::Frontend::default();
+        let options = naga::front::glsl::Options::from(naga::ShaderStage::Fragment);
+        let module = frontend
+            .parse(&options, &super::shader_source())
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&super::shader_source())));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
     }
 }
