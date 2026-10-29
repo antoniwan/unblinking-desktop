@@ -1,10 +1,6 @@
-node_modules/
-snap.png
-dist/
-
-# Fetched and drawn by `npm run setup`
-assets/models/
-assets/icons/
-
 # Rust build output
-rust/target/
+/target/
+
+# --snap and debugging captures
+snap.png
+surface.png
