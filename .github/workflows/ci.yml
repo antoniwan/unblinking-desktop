@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, rust, 'claude/**']
+  pull_request:
+    branches: [main, rust, 'claude/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Check, test and build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned so a new Rust release can't add clippy lints and turn CI red
+      # overnight. Bump it on purpose, and fix the new lints in the same commit.
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      # The artifact is named for the version in Cargo.toml.
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "v=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unblinking-${{ steps.version.outputs.v }}-windows-exe
+          path: target/release/unblinking.exe
+          retention-days: 14
+          if-no-files-found: error
