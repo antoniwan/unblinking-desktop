@@ -138,14 +138,13 @@ impl Moods {
     }
 
     /// Who it is right now.
-    #[allow(dead_code)] // until main.rs shows the theme
+    #[allow(dead_code)] // until the app shows the theme
     pub fn theme(&self) -> &'static Theme {
         self.theme
     }
 
     /// Becomes another theme, keeping the same mood: the eye melts from one
     /// creature's Watchful into the other's, over the usual blend.
-    #[allow(dead_code)] // until main.rs wires the Theme menu
     pub fn set_theme(&mut self, id: &str) {
         let theme = Themes::builtin().pick(Some(id));
         // `ptr::eq` asks "the very same theme?", not "an equal-looking one?".

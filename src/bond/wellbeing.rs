@@ -1,7 +1,7 @@
 //! Wellbeing: the `Watch` that turns what the senses report each frame
-//! into deeds for Remembrance (see remembrance.rs, after Lifesworn's
-//! Remembrance). main.rs fills in a `Signals` and calls `Watch::update`
-//! once a frame; that's all.
+//! into deeds for Remembrance (see the `remembrance` module, after
+//! Lifesworn's Remembrance). The app (app/frame.rs) fills in a `Signals`
+//! and calls `Watch::update` once a frame; that's all.
 //!
 //! What it looks at is deliberately small: whether a face is in view, how
 //! long since the last keyboard or mouse input (never *which* keys), the
@@ -27,8 +27,6 @@
 //!   most once per `SMILE_EVERY_SECS`.
 //! - **A late night**: here during `LATE_HOURS`, once a night. It costs a
 //!   little calm, the way a late night does; it's never a mark against you.
-
-// Not called from main.rs yet; it gets wired in a step after this one.
 
 use std::ops::Range;
 
@@ -72,7 +70,7 @@ const HOUR_SECS: f64 = 3600.0;
 /// gap shows up as rest or a return instead, from the clock).
 const MAX_DT: f32 = 1.0;
 
-/// What main.rs knows this frame.
+/// What the app knows this frame.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Signals {
     /// Unix seconds, from `remembrance::unix_now()`.

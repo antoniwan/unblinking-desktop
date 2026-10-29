@@ -7,7 +7,7 @@
 //!   triggers, which main.rs used to check by itself;
 //! - your face, if you opted in to "Read my face": a held smile delights
 //!   it, and looking away for a while makes it wonder, then pine;
-//! - its temperament, from what it remembers of your days (remembrance.rs):
+//! - its temperament, from what it remembers of your days (bond::remembrance):
 //!   a fond blinki lights up sooner and gets lonely slower, a jumpy one
 //!   stays rattled after a bang, a tired one gets drowsy earlier.
 //!
@@ -23,7 +23,7 @@ use crate::mind::moods::Look;
 use crate::mind::{Line, Mode};
 use crate::senses::expression::Expression;
 
-/// Everything the choice looks at, gathered by main.rs each frame.
+/// Everything the choice looks at, gathered by the app (app/frame.rs) each frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Context {
     pub mode: Mode,

@@ -4,7 +4,7 @@
 //!
 //!   Theme  who it is        (The Burning Eye; more to come)
 //!   Mood   how it feels now (Watchful, Curious, ... one of the studio's 8)
-//!   Mode   what it's doing  (locked on, hunting, blind: mind.rs, internal)
+//!   Mode   what it's doing  (locked on, hunting, blind: the `Mind`, internal)
 //!
 //! So "Wrathful" in The Burning Eye is a white-hot roar, and in some later
 //! theme it might be a cold glare: same feeling, different creature.

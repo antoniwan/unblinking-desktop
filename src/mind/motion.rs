@@ -1,6 +1,6 @@
 //! Motion: the body that carries out what the mind decides.
 //!
-//! The mind (mind.rs) says where to look, how wide the pupil is, how hot the
+//! The mind (`Mind`) says where to look, how wide the pupil is, how hot the
 //! fire burns. Those numbers are right, but on their own they move like a
 //! machine: every change is the same smooth exponential slide. Motion sits
 //! between the mind and the shader and gives the eye a body:
@@ -20,13 +20,8 @@
 
 use std::f64::consts::{PI, TAU};
 
+use super::approach;
 use crate::mind::{Frame, Mode};
-
-/// Moves `cur` toward `target` at `rate` per second, frame-rate independent
-/// (the same `approach` as mind.rs; it's private there, so it's repeated).
-fn approach(cur: f64, target: f64, rate: f64, dt: f64) -> f64 {
-    cur + (target - cur) * (1.0 - (-rate * dt).exp())
-}
 
 /// A spring's character: how fast it is (`f`, in hertz), how quickly its
 /// swinging dies out (`zeta`: below 1 it overshoots, 1 just settles), and how
@@ -562,7 +557,7 @@ mod tests {
         assert_eq!(rest.wince, 0.0);
         assert_eq!(rest.morph, 0.0);
 
-        // A bang: the mind's flare leaps to 1, then decays as mind.rs does.
+        // A bang: the mind's flare leaps to 1, then decays as the mind's does.
         let mut f = calm;
         f.flare = 1.0;
         let mut peak = 0.0f32;
